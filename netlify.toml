@@ -1,0 +1,12 @@
+# This block tells Netlify how to build your React app.
+[build]
+  command = "npm run build"  # The command to build your site
+  publish = "build"          # The folder to deploy (from Create React App)
+
+# This block creates the proxy.
+# It rewrites any request from "/api/..." to "https://api.openalex.org/..."
+[[redirects]]
+  from = "/api/*"
+  to = "https://api.openalex.org/:splat"
+  status = 200 # This means "rewrite" (a proxy), not a 301 "redirect"
+
