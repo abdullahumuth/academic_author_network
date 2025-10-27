@@ -724,7 +724,7 @@ const CollaborationExplorer = () => {
             <div className="text-center text-gray-400 max-w-md px-4">
               <Users className="w-16 h-16 mx-auto mb-4 opacity-50" />
               <p className="text-lg font-medium mb-2">Search for an author to start</p>
-              <p className="text-sm">Try searching for researchers like "Geoffrey Hinton" or "Marie Curie".</p>
+              <p className="text-sm">Try searching for researchers like "Arkadas Ozakin" or "Miles Cranmer".</p>
               <p className="text-xs mt-4 text-gray-400">
                 💡 Double-click nodes to expand their collaborators
               </p>
