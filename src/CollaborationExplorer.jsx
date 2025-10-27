@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Search, Filter, X, Loader2, Users, BookOpen, Award, 
   AlertCircle, Info, Link, ChevronLeft, ChevronRight 
@@ -87,7 +87,7 @@ const CollaborationExplorer = () => {
   };
 
   // Fetch author details and collaborators
-  const fetchAuthorCollaborators = async (authorId) => {
+  const fetchAuthorCollaborators = useCallback(async (authorId) => {
     try {
       // Get author details
       const authorUrl = `${API_BASE}/authors/${authorId}?mailto=${POLITE_EMAIL}`;
@@ -147,11 +147,11 @@ const CollaborationExplorer = () => {
       console.error('Error fetching collaborators:', err);
       throw err;
     }
-  };
+  }, [filters.worksToFetch, API_BASE]);
 
 
   // Add author to graph
-  const addAuthorToGraph = async (authorId) => {
+  const addAuthorToGraph = useCallback(async (authorId) => {
     if (expandedAuthors.has(authorId)) return;
     
     setLoading(true);
@@ -227,7 +227,7 @@ const CollaborationExplorer = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators]);
 
   // Memoized getter for the selected node
   const selectedNode = React.useMemo(() => {
@@ -484,7 +484,7 @@ const CollaborationExplorer = () => {
       resizeObserver.disconnect();
       // Don't stop simulation, just let it run
     };
-  }, [graphData, filters.labelThreshold]); // Only re-run when graphData changes
+  }, [graphData, filters.labelThreshold, addAuthorToGraph, selectedNodeId]);
 
 
   const resetGraph = () => {
