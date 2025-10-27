@@ -4,6 +4,8 @@
 
 A dynamic data visualization tool that lets you explore the collaboration networks of academic authors. Search for a researcher and see their co-authors visualized in an interactive force-directed graph.
 
+![demo](https://github.com/abdullahumuth/academic_author_network/blob/main/public/authornetworkdemo.jpg?raw=true)
+
 -----
 
 ## Features
