@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Search, Filter, X, Loader2, Users, BookOpen, Award, 
   AlertCircle, Info, Link, ChevronLeft, ChevronRight 
@@ -264,7 +264,7 @@ const CollaborationExplorer = () => {
         if (d.count >= filters.labelThreshold) return 'block';
         return 'none';
       });
-
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNodeId, filters.labelThreshold]);
 
 
