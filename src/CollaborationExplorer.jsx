@@ -765,6 +765,13 @@ const CollaborationExplorer = () => {
           </div>
         )}
       </div>
+
+      {/* Small unobtrusive attribution footer */}
+      <div className="absolute bottom-3 right-3 text-xs text-gray-500 bg-white bg-opacity-60 px-3 py-1 rounded-full shadow-sm hover:bg-opacity-80 transition-opacity pointer-events-auto">
+        <a href="https://abdullahumuth.github.io" target="_blank" rel="noopener noreferrer" className="hover:underline">by abdullahumuth</a>
+        <span className="mx-2 text-gray-300">•</span>
+        <a href="https://github.com/abdullahumuth/academic_author_network" target="_blank" rel="noopener noreferrer" className="hover:underline">GitHub</a>
+      </div>
     </div>
   );
 };
