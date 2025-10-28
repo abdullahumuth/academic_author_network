@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Search, Filter, X, Loader2, Users, BookOpen, Award, 
-  AlertCircle, Info, Link, ChevronLeft, ChevronRight 
+  AlertCircle, Info, Link, ChevronLeft, ChevronRight, Menu 
 } from 'lucide-react';
 import * as d3 from 'd3';
 
@@ -507,16 +507,52 @@ const CollaborationExplorer = () => {
 
   return (
     <div className="flex h-screen bg-gray-50 font-sans">
+      {/* Mobile: Hamburger menu button (only visible when sidebar closed) */}
+      {!isSidebarOpen && (
+        <button
+          onClick={() => setIsSidebarOpen(true)}
+          className="fixed top-4 left-4 z-30 md:hidden bg-white p-2 rounded-lg shadow-lg border border-gray-300 hover:bg-gray-50"
+          aria-label="Open menu"
+        >
+          <Menu className="w-6 h-6 text-gray-700" />
+        </button>
+      )}
+
+      {/* Mobile: Backdrop overlay (only visible when sidebar open on mobile) */}
+      {isSidebarOpen && (
+        <div
+          onClick={() => setIsSidebarOpen(false)}
+          className="md:hidden fixed inset-0 bg-black bg-opacity-30 z-10"
+        />
+      )}
+
+      {/* Sidebar */}
       <div className={`
-        ${isSidebarOpen ? 'w-80' : 'w-0'}
-        bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out relative
+        ${isSidebarOpen ? 'w-full md:w-80' : 'w-0'}
+        fixed md:relative inset-y-0 md:inset-auto left-0 md:left-auto z-20 md:z-auto
+        bg-white border-r border-gray-200 flex flex-col transition-all duration-300 ease-in-out
       `}>
+        {/* Desktop: Edge toggle button (hidden on mobile) */}
         <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="absolute -right-4 top-1/2 -translate-y-1/2 z-20 w-8 h-16 bg-white border border-gray-300 rounded-r-lg flex items-center justify-center text-gray-500 hover:bg-gray-50"
+          className={`hidden md:flex absolute top-1/2 -translate-y-1/2 z-20 w-8 h-16 bg-white border border-gray-300 rounded-r-lg items-center justify-center text-gray-500 hover:bg-gray-50 ${
+            isSidebarOpen ? '-right-4' : 'left-0'
+          }`}
+          aria-label={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
         >
           {isSidebarOpen ? <ChevronLeft className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
         </button>
+
+        {/* Mobile: Close button inside sidebar (only visible on mobile when open) */}
+        {isSidebarOpen && (
+          <button
+            onClick={() => setIsSidebarOpen(false)}
+            className="md:hidden absolute top-4 right-4 z-30 text-gray-500 hover:text-gray-700"
+            aria-label="Close menu"
+          >
+            <X className="w-6 h-6" />
+          </button>
+        )}
 
         <div className={`
           flex-1 flex flex-col overflow-y-auto ${isSidebarOpen ? 'opacity-100' : 'opacity-0'} transition-opacity duration-300
