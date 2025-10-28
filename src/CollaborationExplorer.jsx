@@ -324,6 +324,11 @@ const CollaborationExplorer = () => {
         });
       svg.call(zoom);
 
+      // Click background to clear selection
+      svg.on('click', () => {
+        setSelectedNodeId(null);
+      });
+
       g.append('g').attr('class', 'links-container');
       g.append('g').attr('class', 'nodes-container');
 
