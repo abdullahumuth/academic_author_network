@@ -260,26 +260,8 @@ const CollaborationExplorer = () => {
     });
   }, [graphData.nodes, locationFilter.continents, locationFilter.countries, getContinentForCountry, showUnknownInstitutions]);
 
-  // Get filtered links that connect visible nodes
-  const getFilteredLinks = useCallback(() => {
-    const filteredNodes = getFilteredNodes();
-    const visibleNodeIds = new Set(filteredNodes.map(n => n.id));
-    
-    return graphData.links.filter(link => {
-      const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
-      const targetId = typeof link.target === 'object' ? link.target.id : link.target;
-      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId);
-    });
-  }, [graphData.links, getFilteredNodes]);
-
   // Memoize filtered nodes to avoid recalculation on every render
-  const filteredNodesData = React.useMemo(() => getFilteredNodes(), [
-    graphData.nodes,
-    locationFilter.continents,
-    locationFilter.countries,
-    showUnknownInstitutions,
-    getContinentForCountry
-  ]);
+  const filteredNodesData = React.useMemo(() => getFilteredNodes(), [getFilteredNodes]);
 
   // Toggle continent filter
   const toggleContinentFilter = (continentCode) => {
@@ -657,7 +639,7 @@ const CollaborationExplorer = () => {
       resizeObserver.disconnect();
       // Don't stop simulation, just let it run
     };
-  }, [graphData.nodes, graphData.links, locationFilter.continents, locationFilter.countries, showUnknownInstitutions, filters.labelThreshold, addAuthorToGraph, selectedNodeId, getContinentForCountry]);
+  }, [graphData.nodes, graphData.links, locationFilter.continents, locationFilter.countries, showUnknownInstitutions, filters.labelThreshold, addAuthorToGraph, selectedNodeId, getContinentForCountry, filteredNodesData]);
 
 
   const resetGraph = () => {
