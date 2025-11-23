@@ -8,6 +8,16 @@ A dynamic data visualization tool that lets you explore the collaboration networ
 
 -----
 
+## Recent Updates
+
+- Added location-based filtering to the collaboration graph:
+  - Users can now filter collaborators by continent and country.
+  - Introduced a "Location" filter section in the UI for easier exploration.
+  - The D3 force-directed graph dynamically updates to show only nodes and links matching the selected locations.
+  - Added an option to show or hide collaborators whose institutions are unknown.
+
+----
+
 ## Features
 
   * **Interactive Graph:** Visualizes author networks using a D3.js force-directed graph.
