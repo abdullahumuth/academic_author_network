@@ -31,6 +31,54 @@ const fetchWithRetry = async (url, retries = 3, delay = 1000) => {
   }
 };
 
+// Static continent data (moved outside component to prevent recreation)
+const CONTINENTS = [
+  { id: 'Q15', name: 'Africa', code: 'africa' },
+  { id: 'Q51', name: 'Antarctica', code: 'antarctica' },
+  { id: 'Q48', name: 'Asia', code: 'asia' },
+  { id: 'Q46', name: 'Europe', code: 'europe' },
+  { id: 'Q49', name: 'North America', code: 'north_america' },
+  { id: 'Q55643', name: 'Oceania', code: 'oceania' },
+  { id: 'Q18', name: 'South America', code: 'south_america' }
+];
+
+// Static country data (moved outside component to prevent recreation)
+const COUNTRIES = [
+  { code: 'US', name: 'United States', continent: 'north_america' },
+  { code: 'GB', name: 'United Kingdom', continent: 'europe' },
+  { code: 'CA', name: 'Canada', continent: 'north_america' },
+  { code: 'DE', name: 'Germany', continent: 'europe' },
+  { code: 'FR', name: 'France', continent: 'europe' },
+  { code: 'CN', name: 'China', continent: 'asia' },
+  { code: 'JP', name: 'Japan', continent: 'asia' },
+  { code: 'AU', name: 'Australia', continent: 'oceania' },
+  { code: 'IN', name: 'India', continent: 'asia' },
+  { code: 'BR', name: 'Brazil', continent: 'south_america' },
+  { code: 'IT', name: 'Italy', continent: 'europe' },
+  { code: 'ES', name: 'Spain', continent: 'europe' },
+  { code: 'NL', name: 'Netherlands', continent: 'europe' },
+  { code: 'SE', name: 'Sweden', continent: 'europe' },
+  { code: 'CH', name: 'Switzerland', continent: 'europe' },
+  { code: 'KR', name: 'South Korea', continent: 'asia' },
+  { code: 'SG', name: 'Singapore', continent: 'asia' },
+  { code: 'MX', name: 'Mexico', continent: 'north_america' },
+  { code: 'ZA', name: 'South Africa', continent: 'africa' },
+  { code: 'RU', name: 'Russia', continent: 'europe' },
+  { code: 'IL', name: 'Israel', continent: 'asia' },
+  { code: 'TR', name: 'Turkey', continent: 'asia' },
+  { code: 'AR', name: 'Argentina', continent: 'south_america' },
+  { code: 'NZ', name: 'New Zealand', continent: 'oceania' },
+  { code: 'AT', name: 'Austria', continent: 'europe' },
+  { code: 'BE', name: 'Belgium', continent: 'europe' },
+  { code: 'DK', name: 'Denmark', continent: 'europe' },
+  { code: 'NO', name: 'Norway', continent: 'europe' },
+  { code: 'FI', name: 'Finland', continent: 'europe' },
+  { code: 'PL', name: 'Poland', continent: 'europe' },
+  { code: 'PT', name: 'Portugal', continent: 'europe' },
+  { code: 'GR', name: 'Greece', continent: 'europe' },
+  { code: 'IE', name: 'Ireland', continent: 'europe' },
+  { code: 'CZ', name: 'Czech Republic', continent: 'europe' },
+].sort((a, b) => a.name.localeCompare(b.name));
 
 const CollaborationExplorer = () => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -40,6 +88,8 @@ const CollaborationExplorer = () => {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [selectedNodeId, setSelectedNodeId] = useState(null); // Separate state for selection
   const [expandedAuthors, setExpandedAuthors] = useState(new Set());
+  const [locationFilter, setLocationFilter] = useState({ continents: [], countries: [] });
+  const [showUnknownInstitutions, setShowUnknownInstitutions] = useState(true);
   const [filters, setFilters] = useState({
     minCitations: 0,
     minCollaborations: 1,
@@ -47,6 +97,7 @@ const CollaborationExplorer = () => {
     worksToFetch: 200, // Works to scan
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [showLocationFilter, setShowLocationFilter] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // State for sidebar toggle
 
   const svgRef = useRef(null);
@@ -105,6 +156,7 @@ const CollaborationExplorer = () => {
           const collabId = authorship.author.id;
           if (collabId && collabId !== authorId) {
             const institution = (authorship.institutions && authorship.institutions[0]?.display_name) || 'Unknown';
+            const countryCode = (authorship.institutions && authorship.institutions[0]?.country_code) || null;
             const existing = collaboratorMap.get(collabId);
             if (existing) {
               existing.count += 1;
@@ -116,6 +168,7 @@ const CollaborationExplorer = () => {
                 count: 1,
                 totalCitations: work.cited_by_count || 0,
                 institution: institution,
+                countryCode: countryCode,
               });
             }
           }
@@ -132,6 +185,16 @@ const CollaborationExplorer = () => {
         return 'Unknown';
       };
 
+      const getAuthorCountryCode = (data) => {
+        if (data.last_known_institutions && data.last_known_institutions[0]) {
+          return data.last_known_institutions[0].country_code;
+        }
+        if (data.affiliations && data.affiliations[0]) {
+          return data.affiliations[0].institution.country_code;
+        }
+        return null;
+      };
+
       return {
         author: {
           id: authorData.id,
@@ -139,6 +202,7 @@ const CollaborationExplorer = () => {
           worksCount: authorData.works_count,
           citedByCount: authorData.cited_by_count,
           institution: getAuthorInstitution(authorData),
+          countryCode: getAuthorCountryCode(authorData),
           orcid: authorData.orcid
         },
         collaborators: Array.from(collaboratorMap.values())
@@ -149,6 +213,98 @@ const CollaborationExplorer = () => {
     }
   }, [filters.worksToFetch, API_BASE]);
 
+  // Helper function to get continent for a country code
+  const getContinentForCountry = useCallback((countryCode) => {
+    if (!countryCode) return null;
+    const country = COUNTRIES.find(c => c.code === countryCode);
+    return country ? country.continent : null;
+  }, []); // COUNTRIES is now stable (defined outside component)
+
+  // Filter nodes based on location filter
+  const getFilteredNodes = useCallback(() => {
+    return graphData.nodes.filter(node => {
+      // Always show expanded authors (main nodes)
+      if (node.group === 'main' || node.expanded) {
+        return true;
+      }
+
+      const nodeCountry = node.countryCode;
+      const nodeContinent = getContinentForCountry(nodeCountry);
+      const hasUnknownLocation = !nodeCountry || nodeCountry === null;
+
+      // Handle unknown institutions based on user preference
+      if (hasUnknownLocation) {
+        return showUnknownInstitutions;
+      }
+
+      // If no location filters are active, show all (with known locations)
+      if (locationFilter.continents.length === 0 && locationFilter.countries.length === 0) {
+        return true;
+      }
+
+      // If country filter is active, check country
+      if (locationFilter.countries.length > 0) {
+        if (nodeCountry && locationFilter.countries.includes(nodeCountry)) {
+          return true;
+        }
+      }
+
+      // If continent filter is active, check continent
+      if (locationFilter.continents.length > 0) {
+        if (nodeContinent && locationFilter.continents.includes(nodeContinent)) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+  }, [graphData.nodes, locationFilter.continents, locationFilter.countries, getContinentForCountry, showUnknownInstitutions]);
+
+  // Get filtered links that connect visible nodes
+  const getFilteredLinks = useCallback(() => {
+    const filteredNodes = getFilteredNodes();
+    const visibleNodeIds = new Set(filteredNodes.map(n => n.id));
+    
+    return graphData.links.filter(link => {
+      const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
+      const targetId = typeof link.target === 'object' ? link.target.id : link.target;
+      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId);
+    });
+  }, [graphData.links, getFilteredNodes]);
+
+  // Memoize filtered nodes to avoid recalculation on every render
+  const filteredNodesData = React.useMemo(() => getFilteredNodes(), [
+    graphData.nodes,
+    locationFilter.continents,
+    locationFilter.countries,
+    showUnknownInstitutions,
+    getContinentForCountry
+  ]);
+
+  // Toggle continent filter
+  const toggleContinentFilter = (continentCode) => {
+    setLocationFilter(prev => {
+      const continents = prev.continents.includes(continentCode)
+        ? prev.continents.filter(c => c !== continentCode)
+        : [...prev.continents, continentCode];
+      return { ...prev, continents };
+    });
+  };
+
+  // Toggle country filter
+  const toggleCountryFilter = (countryCode) => {
+    setLocationFilter(prev => {
+      const countries = prev.countries.includes(countryCode)
+        ? prev.countries.filter(c => c !== countryCode)
+        : [...prev.countries, countryCode];
+      return { ...prev, countries };
+    });
+  };
+
+  // Clear all location filters
+  const clearLocationFilters = () => {
+    setLocationFilter({ continents: [], countries: [] });
+  };
 
   // Add author to graph
   const addAuthorToGraph = useCallback(async (authorId) => {
@@ -221,6 +377,7 @@ const CollaborationExplorer = () => {
       
       setSearchResults([]);
       setSelectedNodeId(authorId); // Select the newly added node
+      setShowLocationFilter(true); // Auto-expand location filter
     } catch (err) {
       console.error('Failed to load author data:', err);
       setError(`Failed to load author data: ${err.message}`);
@@ -279,9 +436,19 @@ const CollaborationExplorer = () => {
 
     const institutionColor = institutionColorRef.current;
 
+    // Get filtered data from memoized value
+    const filteredNodes = filteredNodesData;
+    // Compute filtered links inline (can't use useMemo inside useEffect)
+    const visibleNodeIds = new Set(filteredNodes.map(n => n.id));
+    const filteredLinks = graphData.links.filter(link => {
+      const sourceId = typeof link.source === 'object' ? link.source.id : link.source;
+      const targetId = typeof link.target === 'object' ? link.target.id : link.target;
+      return visibleNodeIds.has(sourceId) && visibleNodeIds.has(targetId);
+    });
+
     // Node size scale
     const sizeScale = d3.scaleSqrt()
-      .domain([1, d3.max(graphData.nodes, d => d.count) || 1])
+      .domain([1, d3.max(filteredNodes, d => d.count) || 1])
       .range([8, 20]); // Min 8px, max 20px for collaborators
 
     const getNodeRadius = (d) => {
@@ -347,16 +514,16 @@ const CollaborationExplorer = () => {
     // --- Update simulation data ---
     const simulation = simulationRef.current;
     
-    // Update nodes and links
-    simulation.nodes(graphData.nodes);
-    simulation.force('link').links(graphData.links);
+    // Update nodes and links with filtered data
+    simulation.nodes(filteredNodes);
+    simulation.force('link').links(filteredLinks);
 
     // --- D3 Data Join (update, enter, exit) ---
 
     // Links
     const link = d3.select('.links-container')
       .selectAll('line.link')
-      .data(graphData.links, d => `${d.source.id}-${d.target.id}`);
+      .data(filteredLinks, d => `${d.source.id}-${d.target.id}`);
     
     link.exit().remove();
 
@@ -370,7 +537,7 @@ const CollaborationExplorer = () => {
     // Nodes
     const node = d3.select('.nodes-container')
       .selectAll('g.node-group')
-      .data(graphData.nodes, d => d.id);
+      .data(filteredNodes, d => d.id);
     
     node.exit().remove();
 
@@ -482,14 +649,15 @@ const CollaborationExplorer = () => {
     
     resizeObserver.observe(wrapperRef.current);
 
-    // Restart simulation
-    simulation.alpha(0.8).restart();
+    // Restart simulation only if there are actual data changes
+    // Use alpha(0.3) for gentler updates instead of alpha(0.8)
+    simulation.alpha(0.3).restart();
 
     return () => {
       resizeObserver.disconnect();
       // Don't stop simulation, just let it run
     };
-  }, [graphData, filters.labelThreshold, addAuthorToGraph, selectedNodeId]);
+  }, [graphData.nodes, graphData.links, locationFilter.continents, locationFilter.countries, showUnknownInstitutions, filters.labelThreshold, addAuthorToGraph, selectedNodeId, getContinentForCountry]);
 
 
   const resetGraph = () => {
@@ -568,7 +736,13 @@ const CollaborationExplorer = () => {
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  // Only collapse if it's currently open and we're typing
+                  if (e.target.value.trim() && showLocationFilter) {
+                    setShowLocationFilter(false);
+                  }
+                }}
                 onKeyPress={(e) => e.key === 'Enter' && searchAuthors()}
                 placeholder="Search for an author..."
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg pr-10 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -595,6 +769,106 @@ const CollaborationExplorer = () => {
               {showFilters ? 'Hide Filters' : 'Show Filters'}
             </button>
           </div>
+
+          {/* Location Filter - Prominent placement */}
+          {graphData.nodes.length > 0 && (
+            <div className="border-b border-gray-200">
+              <button
+                onClick={() => setShowLocationFilter(!showLocationFilter)}
+                className="w-full p-4 bg-gradient-to-br from-blue-50 to-indigo-50 flex items-center justify-between hover:from-blue-100 hover:to-indigo-100 transition-colors"
+              >
+                <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+                  Location Filter
+                </h3>
+                <div className="flex items-center gap-2">
+                  {(locationFilter.continents.length > 0 || locationFilter.countries.length > 0 || !showUnknownInstitutions) && (
+                    <span className="text-xs bg-blue-600 text-white px-2 py-0.5 rounded-full">
+                      {filteredNodesData.filter(n => n.group === 'collaborator').length}/{graphData.nodes.filter(n => n.group === 'collaborator').length}
+                    </span>
+                  )}
+                  <ChevronRight className={`w-4 h-4 text-gray-600 transition-transform ${
+                    showLocationFilter ? 'rotate-90' : ''
+                  }`} />
+                </div>
+              </button>
+              
+              {showLocationFilter && (
+                <div className="p-4 bg-gradient-to-br from-blue-50 to-indigo-50">
+                  <div className="flex items-center justify-between mb-3">
+                    {(locationFilter.continents.length > 0 || locationFilter.countries.length > 0) && (
+                      <button
+                        onClick={clearLocationFilters}
+                        className="text-xs text-blue-600 hover:text-blue-800 underline ml-auto"
+                      >
+                        Clear all
+                      </button>
+                    )}
+                  </div>
+
+              {/* Continents */}
+              <div className="mb-3">
+                <label className="text-xs font-medium text-gray-700 mb-2 block">Continents</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {CONTINENTS.map(continent => (
+                    <button
+                      key={continent.code}
+                      onClick={() => toggleContinentFilter(continent.code)}
+                      className={`px-2.5 py-1 text-xs rounded-full transition-all ${
+                        locationFilter.continents.includes(continent.code)
+                          ? 'bg-blue-600 text-white shadow-sm'
+                          : 'bg-white text-gray-700 border border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+                      }`}
+                    >
+                      {continent.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Countries */}
+              <div>
+                <label className="text-xs font-medium text-gray-700 mb-2 block">Countries</label>
+                <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                  {COUNTRIES.filter(country => country.code !== 'IL').map(country => ( // Genocidal state exclusion
+                    <button
+                      key={country.code}
+                      onClick={() => toggleCountryFilter(country.code)}
+                      className={`px-2.5 py-1 text-xs rounded-full transition-all ${
+                        locationFilter.countries.includes(country.code)
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-white text-gray-700 border border-gray-300 hover:border-indigo-400 hover:bg-indigo-50'
+                      }`}
+                    >
+                      {country.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Toggle for unknown institutions */}
+              <div className="mt-3 pt-3 border-t border-blue-200">
+                <label className="flex items-center gap-2 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showUnknownInstitutions}
+                    onChange={(e) => setShowUnknownInstitutions(e.target.checked)}
+                    className="w-3.5 h-3.5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                  />
+                  <span className="text-gray-700">Show collaborators with unknown institutions</span>
+                </label>
+              </div>
+
+              {(locationFilter.continents.length > 0 || locationFilter.countries.length > 0 || !showUnknownInstitutions) && (
+                <div className="mt-2 pt-2 border-t border-blue-100">
+                  <p className="text-xs text-gray-600">
+                    Showing {filteredNodesData.filter(n => n.group === 'collaborator').length} of {graphData.nodes.filter(n => n.group === 'collaborator').length} collaborators
+                  </p>
+                </div>
+              )}
+                </div>
+              )}
+            </div>
+          )}
 
           {showFilters && (
             <div className="p-4 bg-gray-50 border-b border-gray-200 space-y-3">
