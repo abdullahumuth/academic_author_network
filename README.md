@@ -10,6 +10,24 @@ A dynamic data visualization tool that lets you explore the collaboration networ
 
 ## Recent Updates
 
+## Recent Updates
+
+### 04.12.2025
+- Improved institution affiliation accuracy:
+  - Now uses the `affiliations` API data instead of `last_known_institutions` for more accurate current institution detection.
+  - Displays up to 3 current affiliations for authors (in search results and selected author panel).
+  - Primary affiliation determined by most recent year and longest tenure.
+- Added "Undo Expansion" feature:
+  - Allows removing an expanded author's collaborators while keeping shared connections.
+  - Authors connected to other expanded nodes are demoted to collaborator status instead of removed.
+- Added node pinning system:
+  - Drag nodes to pin them in place (indicated by dashed slate border).
+  - Right-click or long-press (mobile) to unpin individual nodes.
+  - "Unpin All Nodes" button to release all pinned nodes at once.
+- Mobile UX improvements:
+  - Sidebar automatically closes after actions (expand, undo, reset, unpin) so users can see graph changes.
+
+### 23.11.2025
 - Added location-based filtering to the collaboration graph:
   - Users can now filter collaborators by continent and country.
   - Introduced a "Location" filter section in the UI for easier exploration.
