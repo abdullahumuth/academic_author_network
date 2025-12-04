@@ -502,6 +502,26 @@ const CollaborationExplorer = () => {
 
     // --- D3 Data Join (update, enter, exit) ---
 
+    // Helper functions to pin/unpin nodes with consistent styling
+    const pinNode = (d, element) => {
+      // element should be the .node-group g element
+      d3.select(element).select('.node-circle')
+        .attr('stroke', '#64748b')
+        .attr('stroke-dasharray', '4,2')
+        .attr('stroke-width', 3);
+    };
+
+    const unpinNode = (d, element) => {
+      d.fx = null;
+      d.fy = null;
+      simulation.alpha(0.3).restart();
+      // element should be the .node-group g element
+      d3.select(element).select('.node-circle')
+        .attr('stroke', '#fff')
+        .attr('stroke-dasharray', null)
+        .attr('stroke-width', 2);
+    };
+
     // Links
     const link = d3.select('.links-container')
       .selectAll('line.link')
@@ -523,6 +543,9 @@ const CollaborationExplorer = () => {
     
     node.exit().remove();
 
+    // Long-press tracking for mobile unpin
+    let longPressTimer = null;
+
     const nodeEnter = node.enter().append('g')
       .attr('class', 'node-group')
       .style('cursor', 'pointer')
@@ -534,6 +557,36 @@ const CollaborationExplorer = () => {
         event.stopPropagation();
         if (!d.expanded) {
           addAuthorToGraph(d.id);
+        }
+      })
+      .on('contextmenu', (event, d) => {
+        // Right-click to unpin (desktop)
+        event.preventDefault();
+        event.stopPropagation();
+        if (d.fx != null || d.fy != null) {
+          unpinNode(d, event.currentTarget);
+        }
+      })
+      .on('touchstart', (event, d) => {
+        // Long-press to unpin (mobile)
+        const targetElement = event.currentTarget;
+        longPressTimer = setTimeout(() => {
+          if (d.fx != null || d.fy != null) {
+            unpinNode(d, targetElement);
+          }
+        }, 500);
+      })
+      .on('touchend', () => {
+        if (longPressTimer) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
+        }
+      })
+      .on('touchmove', () => {
+        // Cancel long-press if user moves finger
+        if (longPressTimer) {
+          clearTimeout(longPressTimer);
+          longPressTimer = null;
         }
       })
       .call(d3.drag()
@@ -573,7 +626,10 @@ const CollaborationExplorer = () => {
         if (d.group === 'main') return '#3b82f6';
         if (d.expanded) return '#8b5cf6';
         return institutionColor(d.institution);
-      });
+      })
+      .attr('stroke', d => (d.fx != null || d.fy != null) ? '#64748b' : '#fff')
+      .attr('stroke-dasharray', d => (d.fx != null || d.fy != null) ? '4,2' : null)
+      .attr('stroke-width', d => (d.fx != null || d.fy != null) ? 3 : 2);
     
     nodeUpdate.select('.node-label')
       .text(d => d.name.split(' ').slice(-1)[0]) // Show last name
@@ -590,8 +646,19 @@ const CollaborationExplorer = () => {
       .style('display', d => (d.group === 'collaborator' && getNodeRadius(d) > 10) ? 'block' : 'none');
     
     // --- Drag Functions ---
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let wasDragged = false;
+    let wasAlreadyPinned = false;
+    const DRAG_THRESHOLD = 5; // Minimum pixels to consider it a drag
+
     function dragstarted(event, d) {
       if (!event.active) simulation.alphaTarget(0.1).restart();
+      dragStartX = d.x;
+      dragStartY = d.y;
+      wasDragged = false;
+      // Remember if node was already pinned before this interaction
+      wasAlreadyPinned = (d.fx != null || d.fy != null);
       d.fx = d.x;
       d.fy = d.y;
     }
@@ -599,12 +666,27 @@ const CollaborationExplorer = () => {
     function dragged(event, d) {
       d.fx = event.x;
       d.fy = event.y;
+      // Check if moved beyond threshold
+      const dx = event.x - dragStartX;
+      const dy = event.y - dragStartY;
+      if (Math.sqrt(dx * dx + dy * dy) > DRAG_THRESHOLD) {
+        wasDragged = true;
+      }
     }
     
     function dragended(event, d) {
       if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
+      
+      if (wasDragged) {
+        // Keep node pinned after drag and update styling
+        const nodeElement = event.sourceEvent.target.parentNode;
+        pinNode(d, nodeElement);
+      } else if (!wasAlreadyPinned) {
+        // Just a click on an unpinned node - don't pin it, release
+        d.fx = null;
+        d.fy = null;
+      }
+      // If wasAlreadyPinned and not dragged, keep it pinned (do nothing)
     }
 
     // --- Resize Observer ---
@@ -647,6 +729,105 @@ const CollaborationExplorer = () => {
     setExpandedAuthors(new Set());
     setSelectedNodeId(null);
   };
+
+  // Unpin all nodes
+  const unpinAllNodes = () => {
+    graphData.nodes.forEach(node => {
+      node.fx = null;
+      node.fy = null;
+    });
+    if (simulationRef.current) {
+      simulationRef.current.alpha(0.3).restart();
+    }
+    // Update all node circle styles to unpinned state
+    d3.selectAll('.node-circle')
+      .attr('stroke', '#fff')
+      .attr('stroke-dasharray', null)
+      .attr('stroke-width', 2);
+    // Force re-render to update button visibility
+    setGraphData(prev => ({ ...prev }));
+  };
+
+  // Check if any nodes are pinned
+  const hasPinnedNodes = graphData.nodes.some(node => node.fx != null || node.fy != null);
+
+  // Undo expansion - remove an expanded author's collaborators (keep shared ones)
+  const undoExpansion = useCallback((authorId) => {
+    // Helper to get link endpoint ID (handles D3's object/string duality)
+    const getLinkId = (endpoint) => typeof endpoint === 'object' ? endpoint.id : endpoint;
+
+    setGraphData(prevData => {
+      // Get all other expanded author IDs (excluding the one being undone)
+      const otherExpandedIds = new Set(
+        [...expandedAuthors].filter(id => id !== authorId)
+      );
+
+      // Only remove links where authorId is the SOURCE (i.e., links created by this expansion)
+      // Keep links where authorId is the TARGET (i.e., links from other expanded authors to this node)
+      const remainingLinks = prevData.links.filter(link => {
+        const sourceId = getLinkId(link.source);
+        // Remove links where this author was the expander (source)
+        return sourceId !== authorId;
+      });
+
+      // Build set of node IDs still connected to other expanded authors
+      const connectedToOthers = new Set();
+      remainingLinks.forEach(link => {
+        const sourceId = getLinkId(link.source);
+        const targetId = getLinkId(link.target);
+        // If source is an expanded author, target is connected
+        if (otherExpandedIds.has(sourceId)) connectedToOthers.add(targetId);
+        // Note: In our graph, expanded authors are always the source of their collaborator links
+      });
+      // Also add all other expanded authors themselves
+      otherExpandedIds.forEach(id => connectedToOthers.add(id));
+
+      // Process nodes - MUTATE existing node objects to preserve D3 references
+      const remainingNodes = [];
+      prevData.nodes.forEach(node => {
+        if (node.id === authorId) {
+          // The author being undone - check if connected as collaborator to other expanded authors
+          if (connectedToOthers.has(authorId)) {
+            // Demote to collaborator IN PLACE - recalculate count from remaining links
+            const linkCount = remainingLinks.filter(l => 
+              getLinkId(l.target) === authorId
+            ).reduce((sum, l) => sum + (l.value || 1), 0);
+            
+            // Mutate existing node object to preserve D3 simulation references
+            node.expanded = false;
+            node.group = 'collaborator';
+            node.count = linkCount;
+            remainingNodes.push(node);
+          }
+          // If not connected to others, node is removed (not pushed)
+        } else if (node.expanded || otherExpandedIds.has(node.id)) {
+          // Keep all other expanded authors
+          remainingNodes.push(node);
+        } else if (connectedToOthers.has(node.id)) {
+          // Keep collaborators still connected to other expanded authors
+          remainingNodes.push(node);
+        }
+        // Orphaned collaborators are not pushed (removed)
+      });
+
+      return { nodes: remainingNodes, links: remainingLinks };
+    });
+
+    // Update expandedAuthors set
+    setExpandedAuthors(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(authorId);
+      return newSet;
+    });
+
+    // Clear selection
+    setSelectedNodeId(null);
+
+    // Restart simulation
+    if (simulationRef.current) {
+      simulationRef.current.alpha(0.3).restart();
+    }
+  }, [expandedAuthors]);
   
   const handleFilterChange = (key, value) => {
     setFilters(prev => ({
@@ -993,18 +1174,36 @@ const CollaborationExplorer = () => {
                     {loading ? 'Loading...' : 'Expand Collaborators'}
                   </button>
                 )}
+                {selectedNode.expanded && (
+                  <button
+                    onClick={() => undoExpansion(selectedNode.id)}
+                    className="w-full mt-2 px-3 py-2 bg-red-100 text-red-700 text-sm rounded-lg hover:bg-red-200 transition-colors border border-red-300"
+                  >
+                    Undo Expansion
+                  </button>
+                )}
               </div>
             </div>
           )}
 
           {graphData.nodes.length > 0 && (
             <div className="p-4 border-t border-gray-200 bg-gray-50 mt-auto">
-              <button
-                onClick={resetGraph}
-                className="w-full px-3 py-2 bg-gray-200 text-gray-700 text-sm rounded-lg hover:bg-gray-300 transition-colors"
-              >
-                Reset Graph
-              </button>
+              <div className="space-y-2">
+                {hasPinnedNodes && (
+                  <button
+                    onClick={unpinAllNodes}
+                    className="w-full px-3 py-2 bg-slate-100 text-slate-700 text-sm rounded-lg hover:bg-slate-200 transition-colors border border-slate-300"
+                  >
+                    Unpin All Nodes
+                  </button>
+                )}
+                <button
+                  onClick={resetGraph}
+                  className="w-full px-3 py-2 bg-gray-200 text-gray-700 text-sm rounded-lg hover:bg-gray-300 transition-colors"
+                >
+                  Reset Graph
+                </button>
+              </div>
               <div className="mt-2 text-xs text-gray-500 text-center">
                 {graphData.nodes.length} authors • {graphData.links.length} connections
               </div>
@@ -1052,11 +1251,16 @@ const CollaborationExplorer = () => {
                 <div className="w-4 h-4 rounded-full bg-green-500 border-2 border-white shadow-sm"></div>
                 <span>Collaborator (by Institution)</span>
               </div>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded-full bg-gray-400 border-2 border-slate-500" style={{borderStyle: 'dashed'}}></div>
+                <span>Pinned Node</span>
+              </div>
             </div>
             <div className="mt-3 pt-3 border-t border-gray-200 text-xs text-gray-600">
               <p>• Click to view details</p>
               <p>• Double-click to expand</p>
-              <p>• Drag to reposition</p>
+              <p>• Drag to pin in place</p>
+              <p>• Right-click / long-press to unpin</p>
               <p>• Scroll to zoom</p>
             </div>
           </div>
