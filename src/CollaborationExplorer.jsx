@@ -80,6 +80,53 @@ const COUNTRIES = [
   { code: 'CZ', name: 'Czech Republic', continent: 'europe' },
 ].sort((a, b) => a.name.localeCompare(b.name));
 
+// Helper to parse complex affiliations
+const getAuthorAffiliationProfile = (authorData) => {
+  // Default fallback if no affiliations exist
+  const fallback = {
+    primary: {
+      name: (authorData.last_known_institutions?.[0]?.display_name) || 'Unknown',
+      countryCode: (authorData.last_known_institutions?.[0]?.country_code) || null
+    },
+    all: [] // No history to show
+  };
+
+  if (!authorData.affiliations || authorData.affiliations.length === 0) {
+    return fallback;
+  }
+
+  // 1. Find the most recent year in their data
+  let maxYear = 0;
+  authorData.affiliations.forEach(aff => {
+    const latest = Math.max(...aff.years);
+    if (latest > maxYear) maxYear = latest;
+  });
+
+  // 2. Filter for institutions active in that max year
+  const currentAffiliations = authorData.affiliations.filter(aff => 
+    aff.years.includes(maxYear)
+  );
+
+  if (currentAffiliations.length === 0) return fallback;
+
+  // 3. Sort by tenure (total years affiliated) descending
+  // This ensures the "Primary" institution is the one they are most established at
+  currentAffiliations.sort((a, b) => b.years.length - a.years.length);
+
+  // 4. Extract clean objects
+  const formattedAffiliations = currentAffiliations.map(aff => ({
+    name: aff.institution.display_name,
+    countryCode: aff.institution.country_code,
+    years: aff.years
+  }));
+
+  return {
+    primary: formattedAffiliations[0], // The winner (for color/clustering)
+    all: formattedAffiliations.slice(0, 3) // Top 3 (for display)
+  };
+};
+
+
 const CollaborationExplorer = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
@@ -144,6 +191,8 @@ const CollaborationExplorer = () => {
       const authorUrl = `${API_BASE}/authors/${authorId}?mailto=${POLITE_EMAIL}`;
       const authorData = await fetchWithRetry(authorUrl);
 
+      const affiliationProfile = getAuthorAffiliationProfile(authorData);
+
       // Get works to find collaborators
       const worksUrl = `${API_BASE}/works?filter=author.id:${authorId}&per-page=${filters.worksToFetch}&sort=cited_by_count:desc&mailto=${POLITE_EMAIL}`;
       const worksData = await fetchWithRetry(worksUrl);
@@ -174,26 +223,6 @@ const CollaborationExplorer = () => {
           }
         });
       });
-      
-      const getAuthorInstitution = (data) => {
-        if (data.last_known_institutions && data.last_known_institutions[0]) {
-          return data.last_known_institutions[0].display_name;
-        }
-        if (data.affiliations && data.affiliations[0]) {
-          return data.affiliations[0].institution.display_name;
-        }
-        return 'Unknown';
-      };
-
-      const getAuthorCountryCode = (data) => {
-        if (data.last_known_institutions && data.last_known_institutions[0]) {
-          return data.last_known_institutions[0].country_code;
-        }
-        if (data.affiliations && data.affiliations[0]) {
-          return data.affiliations[0].institution.country_code;
-        }
-        return null;
-      };
 
       return {
         author: {
@@ -201,8 +230,10 @@ const CollaborationExplorer = () => {
           name: authorData.display_name,
           worksCount: authorData.works_count,
           citedByCount: authorData.cited_by_count,
-          institution: getAuthorInstitution(authorData),
-          countryCode: getAuthorCountryCode(authorData),
+          institution: affiliationProfile.primary.name,
+          countryCode: affiliationProfile.primary.countryCode,
+          // Used for UI Display (Array of up to 3)
+          affiliationsList: affiliationProfile.all,
           orcid: authorData.orcid
         },
         collaborators: Array.from(collaboratorMap.values())
@@ -288,6 +319,13 @@ const CollaborationExplorer = () => {
     setLocationFilter({ continents: [], countries: [] });
   };
 
+  // Helper to close sidebar on mobile (screen width < 768px matches md: breakpoint)
+  const closeSidebarOnMobile = useCallback(() => {
+    if (window.innerWidth < 768) {
+      setIsSidebarOpen(false);
+    }
+  }, []);
+
   // Add author to graph
   const addAuthorToGraph = useCallback(async (authorId) => {
     if (expandedAuthors.has(authorId)) return;
@@ -360,13 +398,14 @@ const CollaborationExplorer = () => {
       setSearchResults([]);
       setSelectedNodeId(authorId); // Select the newly added node
       setShowLocationFilter(true); // Auto-expand location filter
+      closeSidebarOnMobile(); // Close sidebar on mobile so user sees the graph
     } catch (err) {
       console.error('Failed to load author data:', err);
       setError(`Failed to load author data: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators]);
+  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators, closeSidebarOnMobile]);
 
   // Memoized getter for the selected node
   const selectedNode = React.useMemo(() => {
@@ -728,6 +767,7 @@ const CollaborationExplorer = () => {
     setGraphData({ nodes: [], links: [] });
     setExpandedAuthors(new Set());
     setSelectedNodeId(null);
+    closeSidebarOnMobile();
   };
 
   // Unpin all nodes
@@ -746,6 +786,7 @@ const CollaborationExplorer = () => {
       .attr('stroke-width', 2);
     // Force re-render to update button visibility
     setGraphData(prev => ({ ...prev }));
+    closeSidebarOnMobile();
   };
 
   // Check if any nodes are pinned
@@ -823,11 +864,14 @@ const CollaborationExplorer = () => {
     // Clear selection
     setSelectedNodeId(null);
 
+    // Close sidebar on mobile so user sees the graph changes
+    closeSidebarOnMobile();
+
     // Restart simulation
     if (simulationRef.current) {
       simulationRef.current.alpha(0.3).restart();
     }
-  }, [expandedAuthors]);
+  }, [expandedAuthors, closeSidebarOnMobile]);
   
   const handleFilterChange = (key, value) => {
     setFilters(prev => ({
@@ -1091,9 +1135,7 @@ const CollaborationExplorer = () => {
             <div className="p-4 space-y-2">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Search Results ({searchResults.length})</h3>
               {searchResults.map(author => {
-                const institution = (author.last_known_institutions && author.last_known_institutions[0]?.display_name) ||
-                                  (author.affiliations && author.affiliations[0]?.institution.display_name) ||
-                                  'Unknown Institution';
+                const affiliationProfile = getAuthorAffiliationProfile(author);
                 return (
                   <button
                     key={author.id}
@@ -1101,8 +1143,17 @@ const CollaborationExplorer = () => {
                     className="w-full text-left p-3 bg-white border border-gray-200 rounded-lg hover:border-blue-500 hover:shadow-sm transition-all"
                   >
                     <div className="font-medium text-gray-900 text-sm">{author.display_name}</div>
-                    <div className="text-xs text-gray-500 mt-1 truncate">
-                      {institution}
+                    <div className="text-xs text-gray-500 mt-1 space-y-0.5">
+                      {affiliationProfile.all.length > 0 ? (
+                        affiliationProfile.all.map((aff, index) => (
+                          <div key={index} className="flex items-start gap-1.5">
+                            <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${index === 0 ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                            <span className="truncate">{aff.name}</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="truncate">{affiliationProfile.primary.name}</div>
+                      )}
                     </div>
                     <div className="flex items-center gap-3 mt-2 text-xs text-gray-600">
                       <span className="flex items-center gap-1">
@@ -1142,9 +1193,23 @@ const CollaborationExplorer = () => {
                   <Link className="w-3 h-3" />
                   View on OpenAlex
                 </a>
-                {selectedNode.institution && (
-                  <div className="text-xs text-gray-600">{selectedNode.institution}</div>
-                )}
+                <div className="text-xs text-gray-600 space-y-1 mt-1">
+                        {selectedNode.affiliationsList && selectedNode.affiliationsList.length > 0 ? (
+                          selectedNode.affiliationsList.map((aff, index) => (
+                            <div key={index} className="flex items-start gap-1.5">
+                               {/* Add a dot to indicate primary vs secondary */}
+                              <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${index === 0 ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                              <span>{aff.name}</span>
+                            </div>
+                          ))
+                        ) : (
+                          // Fallback for collaborators (who don't have the rich profile data loaded yet)
+                          <div className="flex items-start gap-1.5">
+                             <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 bg-blue-500" />
+                             <span>{selectedNode.institution}</span>
+                          </div>
+                        )}
+                      </div>
                 <div className="flex flex-wrap gap-2 text-xs">
                   {selectedNode.worksCount !== undefined && (
                     <span className="px-2 py-1 bg-white rounded flex items-center gap-1">
