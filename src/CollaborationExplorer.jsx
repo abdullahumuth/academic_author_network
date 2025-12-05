@@ -80,15 +80,56 @@ const COUNTRIES = [
   { code: 'CZ', name: 'Czech Republic', continent: 'europe' },
 ].sort((a, b) => a.name.localeCompare(b.name));
 
+// Fallback country codes for institutions where OpenAlex has null country_code
+// Key can be ROR ID or institution name (lowercase)
+const INSTITUTION_COUNTRY_FALLBACK = {
+  // By ROR ID
+  'https://ror.org/00sekdz59': 'US', // Flatiron Institute
+  'https://ror.org/05dxps055': 'US', // California Institute of Technology
+  // By name (lowercase) - add more as needed
+  'flatiron institute': 'US',
+  'simons foundation': 'US',
+  'institute for advanced study': 'US',
+  'perimeter institute': 'CA',
+};
+
+// Helper to get country code with fallback
+const getCountryCodeWithFallback = (institution) => {
+  if (!institution) return null;
+  
+  // First, try the direct country_code
+  if (institution.country_code) return institution.country_code;
+  
+  // Try ROR fallback
+  if (institution.ror && INSTITUTION_COUNTRY_FALLBACK[institution.ror]) {
+    return INSTITUTION_COUNTRY_FALLBACK[institution.ror];
+  }
+  
+  // Try name fallback (lowercase)
+  if (institution.display_name) {
+    const nameLower = institution.display_name.toLowerCase();
+    if (INSTITUTION_COUNTRY_FALLBACK[nameLower]) {
+      return INSTITUTION_COUNTRY_FALLBACK[nameLower];
+    }
+  }
+  
+  return null;
+};
+
 // Helper to parse complex affiliations
 const getAuthorAffiliationProfile = (authorData) => {
   // Default fallback if no affiliations exist
+  const lastKnownInst = authorData.last_known_institutions?.[0];
   const fallback = {
     primary: {
-      name: (authorData.last_known_institutions?.[0]?.display_name) || 'Unknown',
-      countryCode: (authorData.last_known_institutions?.[0]?.country_code) || null
+      name: lastKnownInst?.display_name || 'Unknown',
+      countryCode: getCountryCodeWithFallback(lastKnownInst)
     },
-    all: [] // No history to show
+    all: lastKnownInst ? [{
+      name: lastKnownInst.display_name,
+      countryCode: getCountryCodeWithFallback(lastKnownInst),
+      years: []
+    }] : [] // Include last_known in 'all' for display consistency
   };
 
   if (!authorData.affiliations || authorData.affiliations.length === 0) {
@@ -113,12 +154,15 @@ const getAuthorAffiliationProfile = (authorData) => {
   // This ensures the "Primary" institution is the one they are most established at
   currentAffiliations.sort((a, b) => b.years.length - a.years.length);
 
-  // 4. Extract clean objects
-  const formattedAffiliations = currentAffiliations.map(aff => ({
-    name: aff.institution.display_name,
-    countryCode: aff.institution.country_code,
-    years: aff.years
-  }));
+  // 4. Extract clean objects with fallback country codes
+  const formattedAffiliations = currentAffiliations.map(aff => {
+    const countryCode = getCountryCodeWithFallback(aff.institution);
+    return {
+      name: aff.institution.display_name,
+      countryCode: countryCode,
+      years: aff.years
+    };
+  });
 
   return {
     primary: formattedAffiliations[0], // The winner (for color/clustering)
@@ -146,6 +190,8 @@ const CollaborationExplorer = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [showLocationFilter, setShowLocationFilter] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // State for sidebar toggle
+  // Institution fetch mode: 'smart' = from works, fetch profile if unknown; 'always' = always fetch profile
+  const [institutionFetchMode, setInstitutionFetchMode] = useState('smart');
 
   const svgRef = useRef(null);
   const simulationRef = useRef(null);
@@ -210,6 +256,12 @@ const CollaborationExplorer = () => {
             if (existing) {
               existing.count += 1;
               existing.totalCitations += work.cited_by_count || 0;
+              // If we previously had "Unknown" but now found a valid institution, update it
+              if (existing.institution === 'Unknown' && institution !== 'Unknown') {
+                existing.institution = institution;
+                existing.countryCode = countryCode;
+                existing.needsProfileFetch = false;
+              }
             } else {
               collaboratorMap.set(collabId, {
                 id: collabId,
@@ -218,11 +270,68 @@ const CollaborationExplorer = () => {
                 totalCitations: work.cited_by_count || 0,
                 institution: institution,
                 countryCode: countryCode,
+                needsProfileFetch: institution === 'Unknown', // Flag for smart mode
               });
             }
           }
         });
       });
+
+      let collaborators = Array.from(collaboratorMap.values());
+
+      // Fetch detailed institution data based on mode
+      if (institutionFetchMode === 'always') {
+        // Fetch profile for ALL collaborators
+        const profilePromises = collaborators.map(async (collab) => {
+          try {
+            const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
+            const collabData = await fetchWithRetry(collabUrl);
+            const collabProfile = getAuthorAffiliationProfile(collabData);
+            return {
+              ...collab,
+              institution: collabProfile.primary.name,
+              countryCode: collabProfile.primary.countryCode,
+              affiliationsList: collabProfile.all,
+            };
+          } catch (err) {
+            console.warn(`Failed to fetch profile for ${collab.name}:`, err);
+            return collab; // Keep original data on failure
+          }
+        });
+        collaborators = await Promise.all(profilePromises);
+      } else if (institutionFetchMode === 'smart') {
+        // Only fetch profile for collaborators with unknown institutions
+        const unknownCollabs = collaborators.filter(c => c.needsProfileFetch);
+        if (unknownCollabs.length > 0) {
+          const profilePromises = unknownCollabs.map(async (collab) => {
+            try {
+              const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
+              const collabData = await fetchWithRetry(collabUrl);
+              const collabProfile = getAuthorAffiliationProfile(collabData);
+              return {
+                id: collab.id,
+                institution: collabProfile.primary.name,
+                countryCode: collabProfile.primary.countryCode,
+                affiliationsList: collabProfile.all,
+              };
+            } catch (err) {
+              console.warn(`Failed to fetch profile for ${collab.name}:`, err);
+              return null; // Signal failure
+            }
+          });
+          const fetchedProfiles = await Promise.all(profilePromises);
+          
+          // Update collaborators with fetched data
+          const profileMap = new Map(fetchedProfiles.filter(p => p).map(p => [p.id, p]));
+          collaborators = collaborators.map(collab => {
+            const fetched = profileMap.get(collab.id);
+            if (fetched) {
+              return { ...collab, ...fetched };
+            }
+            return collab;
+          });
+        }
+      }
 
       return {
         author: {
@@ -236,13 +345,13 @@ const CollaborationExplorer = () => {
           affiliationsList: affiliationProfile.all,
           orcid: authorData.orcid
         },
-        collaborators: Array.from(collaboratorMap.values())
+        collaborators: collaborators
       };
     } catch (err) {
       console.error('Error fetching collaborators:', err);
       throw err;
     }
-  }, [filters.worksToFetch, API_BASE]);
+  }, [filters.worksToFetch, API_BASE, institutionFetchMode]);
 
   // Helper function to get continent for a country code
   const getContinentForCountry = useCallback((countryCode) => {
@@ -261,21 +370,27 @@ const CollaborationExplorer = () => {
 
       const nodeCountry = node.countryCode;
       const nodeContinent = getContinentForCountry(nodeCountry);
+      // Location is unknown if we don't have a country code (regardless of institution name)
       const hasUnknownLocation = !nodeCountry || nodeCountry === null;
 
-      // Handle unknown institutions based on user preference
+      // If no location filters are active, handle based on unknown institution preference
+      if (locationFilter.continents.length === 0 && locationFilter.countries.length === 0) {
+        // Only filter out if location is unknown AND user doesn't want to see unknowns
+        if (hasUnknownLocation) {
+          return showUnknownInstitutions;
+        }
+        return true;
+      }
+
+      // Location filters are active
+      // If location is unknown, treat as "unknown" and respect the showUnknownInstitutions toggle
       if (hasUnknownLocation) {
         return showUnknownInstitutions;
       }
 
-      // If no location filters are active, show all (with known locations)
-      if (locationFilter.continents.length === 0 && locationFilter.countries.length === 0) {
-        return true;
-      }
-
       // If country filter is active, check country
       if (locationFilter.countries.length > 0) {
-        if (nodeCountry && locationFilter.countries.includes(nodeCountry)) {
+        if (locationFilter.countries.includes(nodeCountry)) {
           return true;
         }
       }
@@ -1115,6 +1230,39 @@ const CollaborationExplorer = () => {
                   onChange={(e) => handleFilterChange('worksToFetch', e.target.value || 200)}
                   className="w-full px-2 py-1 text-sm border border-gray-300 rounded"
                 />
+              </div>
+              <div className="pt-3 border-t border-gray-200">
+                <label className="text-xs text-gray-600 block mb-2">Collaborator Institution Source</label>
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 text-xs cursor-pointer">
+                    <input
+                      type="radio"
+                      name="institutionMode"
+                      value="smart"
+                      checked={institutionFetchMode === 'smart'}
+                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <span className="font-medium text-gray-700">Smart</span>
+                      <p className="text-gray-500">Use institution from shared work; fetch profile only if unknown</p>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-2 text-xs cursor-pointer">
+                    <input
+                      type="radio"
+                      name="institutionMode"
+                      value="always"
+                      checked={institutionFetchMode === 'always'}
+                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <span className="font-medium text-gray-700">Always Accurate</span>
+                      <p className="text-gray-500">Always fetch each collaborator's profile (slower, more API calls)</p>
+                    </div>
+                  </label>
+                </div>
               </div>
             </div>
           )}
