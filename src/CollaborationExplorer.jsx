@@ -159,8 +159,9 @@ const CollaborationExplorer = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [showLocationFilter, setShowLocationFilter] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // State for sidebar toggle
-  // Institution fetch mode: 'smart' = from works, fetch profile if unknown; 'always' = always fetch profile
-  const [institutionFetchMode, setInstitutionFetchMode] = useState('smart');
+  // Fix unknown affiliations state
+  const [isFixingUnknowns, setIsFixingUnknowns] = useState(false);
+  const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
   // Mobile detection for bottom sheet vs sidebar selection
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
   // Legend visibility with localStorage persistence
@@ -175,6 +176,7 @@ const CollaborationExplorer = () => {
   const simulationRef = useRef(null);
   const wrapperRef = useRef(null); // Ref for the SVG container
   const institutionColorRef = useRef(d3.scaleOrdinal(d3.schemeCategory10)); // Store color scale in ref
+  const fixingAbortRef = useRef(false); // Abort flag for fixing unknowns
 
   // Email for polite pool - increases rate limit
   const POLITE_EMAIL = 'user@academic-collab.app';
@@ -276,61 +278,11 @@ const CollaborationExplorer = () => {
         });
       });
 
-      let collaborators = Array.from(collaboratorMap.values());
+      const collaborators = Array.from(collaboratorMap.values());
 
-      // Fetch detailed institution data based on mode
-      if (institutionFetchMode === 'always') {
-        // Fetch profile for ALL collaborators
-        const profilePromises = collaborators.map(async (collab) => {
-          try {
-            const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
-            const collabData = await fetchWithRetry(collabUrl);
-            const collabProfile = getAuthorAffiliationProfile(collabData);
-            return {
-              ...collab,
-              institution: collabProfile.primary.name,
-              countryCode: collabProfile.primary.countryCode,
-              affiliationsList: collabProfile.all,
-            };
-          } catch (err) {
-            console.warn(`Failed to fetch profile for ${collab.name}:`, err);
-            return collab; // Keep original data on failure
-          }
-        });
-        collaborators = await Promise.all(profilePromises);
-      } else if (institutionFetchMode === 'smart') {
-        // Only fetch profile for collaborators with unknown institutions
-        const unknownCollabs = collaborators.filter(c => c.needsProfileFetch);
-        if (unknownCollabs.length > 0) {
-          const profilePromises = unknownCollabs.map(async (collab) => {
-            try {
-              const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
-              const collabData = await fetchWithRetry(collabUrl);
-              const collabProfile = getAuthorAffiliationProfile(collabData);
-              return {
-                id: collab.id,
-                institution: collabProfile.primary.name,
-                countryCode: collabProfile.primary.countryCode,
-                affiliationsList: collabProfile.all,
-              };
-            } catch (err) {
-              console.warn(`Failed to fetch profile for ${collab.name}:`, err);
-              return null; // Signal failure
-            }
-          });
-          const fetchedProfiles = await Promise.all(profilePromises);
-          
-          // Update collaborators with fetched data
-          const profileMap = new Map(fetchedProfiles.filter(p => p).map(p => [p.id, p]));
-          collaborators = collaborators.map(collab => {
-            const fetched = profileMap.get(collab.id);
-            if (fetched) {
-              return { ...collab, ...fetched };
-            }
-            return collab;
-          });
-        }
-      }
+      // Log collaborator stats (unknowns will be fixed progressively after load)
+      const unknownCount = collaborators.filter(c => c.needsProfileFetch).length;
+      console.log(`[COLLABORATORS] Total: ${collaborators.length}, Unknown affiliations: ${unknownCount}`);
 
       return {
         author: {
@@ -350,7 +302,7 @@ const CollaborationExplorer = () => {
       console.error('Error fetching collaborators:', err);
       throw err;
     }
-  }, [filters.worksToFetch, API_BASE, institutionFetchMode]);
+  }, [filters.worksToFetch, API_BASE]);
 
   // Helper function to get continent for a country code
   const getContinentForCountry = useCallback((countryCode) => {
@@ -440,6 +392,76 @@ const CollaborationExplorer = () => {
     }
   }, []);
 
+  // Fix unknown affiliations progressively (fetches profiles one at a time with live updates)
+  // refreshAll = false: only fix unknowns, refreshAll = true: update all unattempted collaborators
+  const fixUnknownAffiliations = useCallback(async (refreshAll = false) => {
+    // Get nodes to process based on mode
+    const targetNodes = graphData.nodes.filter(
+      n => n.group === 'collaborator' && 
+           !n.affiliationAttempted && 
+           (refreshAll || n.institution === 'Unknown' || !n.countryCode)
+    );
+    
+    if (targetNodes.length === 0) {
+      console.log('[FIX AFFILIATIONS] No affiliations to update');
+      return;
+    }
+    
+    console.log(`[FIX AFFILIATIONS] Starting to update ${targetNodes.length} affiliations (mode: ${refreshAll ? 'all' : 'unknowns'})`);
+    setIsFixingUnknowns(true);
+    setFixProgress({ current: 0, total: targetNodes.length });
+    fixingAbortRef.current = false;
+    
+    for (let i = 0; i < targetNodes.length; i++) {
+      // Check if abort was requested
+      if (fixingAbortRef.current) {
+        console.log(`[FIX AFFILIATIONS] Aborted at ${i}/${targetNodes.length}`);
+        break;
+      }
+      
+      const node = targetNodes[i];
+      
+      try {
+        const collabUrl = `${API_BASE}/authors/${node.id}?mailto=${POLITE_EMAIL}`;
+        const collabData = await fetchWithRetry(collabUrl);
+        const collabProfile = getAuthorAffiliationProfile(collabData);
+        
+        // MUTATE the node directly to preserve D3 references
+        node.institution = collabProfile.primary.name;
+        node.countryCode = collabProfile.primary.countryCode;
+        node.affiliationsList = collabProfile.all;
+        node.affiliationAttempted = true; // Mark as attempted so we don't retry
+        
+        // Trigger re-render by updating graphData reference (but keeping same node objects)
+        setGraphData(prevData => ({ ...prevData }));
+        
+        console.log(`[FIX AFFILIATIONS] Updated ${i + 1}/${targetNodes.length}: ${node.name} -> ${collabProfile.primary.name}`);
+      } catch (err) {
+        console.warn(`[FIX AFFILIATIONS] Failed to update ${node.name}:`, err.message);
+        // Mark as attempted even on failure so we don't keep retrying
+        node.affiliationAttempted = true;
+        setGraphData(prevData => ({ ...prevData }));
+      }
+      
+      // Update progress
+      setFixProgress({ current: i + 1, total: targetNodes.length });
+      
+      // Delay between requests to respect rate limit (120ms = ~8 req/sec, safe for 10 req/sec limit)
+      if (i < targetNodes.length - 1 && !fixingAbortRef.current) {
+        await new Promise(res => setTimeout(res, 120));
+      }
+    }
+    
+    setIsFixingUnknowns(false);
+    console.log('[FIX AFFILIATIONS] Finished updating affiliations');
+  }, [graphData.nodes, API_BASE, POLITE_EMAIL]);
+
+  // Stop fixing unknowns
+  const stopFixingUnknowns = useCallback(() => {
+    fixingAbortRef.current = true;
+    console.log('[FIX UNKNOWNS] Stop requested');
+  }, []);
+
   // Add author to graph
   const addAuthorToGraph = useCallback(async (authorId) => {
     if (expandedAuthors.has(authorId)) return;
@@ -513,13 +535,24 @@ const CollaborationExplorer = () => {
       setSelectedNodeId(authorId); // Select the newly added node
       setShowLocationFilter(true); // Auto-expand location filter
       closeSidebarOnMobile(); // Close sidebar on mobile so user sees the graph
+      
+      // Auto-fix unknown affiliations after a brief delay (allows graph to render first)
+      setTimeout(() => {
+        // Check if there are unknowns to fix before starting (only unattempted ones)
+        const hasUnknowns = collaborators.some(
+          c => !c.affiliationAttempted && (c.institution === 'Unknown' || !c.countryCode)
+        );
+        if (hasUnknowns) {
+          fixUnknownAffiliations(false); // Only fix unknowns on auto-start
+        }
+      }, 500);
     } catch (err) {
       console.error('Failed to load author data:', err);
       setError(`Failed to load author data: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators, closeSidebarOnMobile]);
+  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators, closeSidebarOnMobile, fixUnknownAffiliations]);
 
   // Memoized getter for the selected node
   const selectedNode = React.useMemo(() => {
@@ -1179,6 +1212,80 @@ const CollaborationExplorer = () => {
                 </label>
               </div>
 
+              {/* Fix Unknown Affiliations Section */}
+              {(() => {
+                // Count unknowns (need fixing) and all unattempted (for update all)
+                const unknownCount = graphData.nodes.filter(
+                  n => n.group === 'collaborator' && 
+                       !n.affiliationAttempted && 
+                       (n.institution === 'Unknown' || !n.countryCode)
+                ).length;
+                const refreshableCount = graphData.nodes.filter(
+                  n => n.group === 'collaborator' && !n.affiliationAttempted
+                ).length;
+                
+                if (isFixingUnknowns) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-gray-700 font-medium">
+                          Updating affiliations... {fixProgress.current}/{fixProgress.total}
+                        </span>
+                        <button
+                          onClick={stopFixingUnknowns}
+                          className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-1.5">
+                        <div 
+                          className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                }
+                
+                if (unknownCount > 0) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <button
+                        onClick={() => fixUnknownAffiliations(false)}
+                        className="w-full text-xs px-3 py-2 bg-amber-100 text-amber-800 rounded-lg hover:bg-amber-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        Fix {unknownCount} Unknown Affiliations
+                      </button>
+                      {refreshableCount > unknownCount && (
+                        <button
+                          onClick={() => fixUnknownAffiliations(true)}
+                          className="w-full mt-1.5 text-xs text-gray-500 hover:text-blue-600 underline"
+                        >
+                          Or update all {refreshableCount} to current
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                
+                if (refreshableCount > 0) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <button
+                        onClick={() => fixUnknownAffiliations(true)}
+                        className="w-full text-xs px-3 py-2 bg-blue-100 text-blue-800 rounded-lg hover:bg-blue-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        Update {refreshableCount} to Current Affiliations
+                      </button>
+                    </div>
+                  );
+                }
+                
+                return null;
+              })()}
+
               {(locationFilter.continents.length > 0 || locationFilter.countries.length > 0 || !showUnknownInstitutions) && (
                 <div className="mt-2 pt-2 border-t border-blue-100">
                   <p className="text-xs text-gray-600">
@@ -1229,39 +1336,6 @@ const CollaborationExplorer = () => {
                   onChange={(e) => handleFilterChange('worksToFetch', e.target.value || 200)}
                   className="w-full px-2 py-1 text-sm border border-gray-300 rounded"
                 />
-              </div>
-              <div className="pt-3 border-t border-gray-200">
-                <label className="text-xs text-gray-600 block mb-2">Collaborator Institution Source</label>
-                <div className="space-y-2">
-                  <label className="flex items-start gap-2 text-xs cursor-pointer">
-                    <input
-                      type="radio"
-                      name="institutionMode"
-                      value="smart"
-                      checked={institutionFetchMode === 'smart'}
-                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <span className="font-medium text-gray-700">Smart</span>
-                      <p className="text-gray-500">Use institution from shared work; fetch profile only if unknown</p>
-                    </div>
-                  </label>
-                  <label className="flex items-start gap-2 text-xs cursor-pointer">
-                    <input
-                      type="radio"
-                      name="institutionMode"
-                      value="always"
-                      checked={institutionFetchMode === 'always'}
-                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <span className="font-medium text-gray-700">Always Accurate</span>
-                      <p className="text-gray-500">Always fetch each collaborator's profile (slower, more API calls)</p>
-                    </div>
-                  </label>
-                </div>
               </div>
             </div>
           )}
