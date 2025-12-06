@@ -145,9 +145,37 @@ const CollaborationExplorer = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
+  // Initialize graphData from localStorage (restore session on reload)
+  const [graphData, setGraphData] = useState(() => {
+    if (typeof window === 'undefined') return { nodes: [], links: [] };
+    try {
+      const stored = localStorage.getItem('collab-explorer-graph-v1');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        console.log('[RESTORE] Loaded graph from localStorage:', parsed.nodes?.length, 'nodes');
+        return parsed;
+      }
+    } catch (err) {
+      console.warn('[RESTORE] Failed to parse stored graph:', err);
+    }
+    return { nodes: [], links: [] };
+  });
   const [selectedNodeId, setSelectedNodeId] = useState(null); // Separate state for selection
-  const [expandedAuthors, setExpandedAuthors] = useState(new Set());
+  // Initialize expandedAuthors from localStorage
+  const [expandedAuthors, setExpandedAuthors] = useState(() => {
+    if (typeof window === 'undefined') return new Set();
+    try {
+      const stored = localStorage.getItem('collab-explorer-expanded-v1');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        console.log('[RESTORE] Loaded expandedAuthors from localStorage:', parsed.length, 'authors');
+        return new Set(parsed);
+      }
+    } catch (err) {
+      console.warn('[RESTORE] Failed to parse stored expandedAuthors:', err);
+    }
+    return new Set();
+  });
   const [locationFilter, setLocationFilter] = useState({ continents: [], countries: [] });
   const [showUnknownInstitutions, setShowUnknownInstitutions] = useState(true);
   const [filters, setFilters] = useState({
@@ -199,6 +227,56 @@ const CollaborationExplorer = () => {
   useEffect(() => {
     localStorage.setItem('legend-visible', showLegend.toString());
   }, [showLegend]);
+
+  // Effect to persist graph state to localStorage (debounced to avoid excessive writes)
+  useEffect(() => {
+    if (graphData.nodes.length === 0) return; // Don't save empty state
+    const timer = setTimeout(() => {
+      try {
+        // Serialize nodes (strip D3-specific properties like x, y, vx, vy but keep fx, fy for pinned)
+        const serializable = {
+          nodes: graphData.nodes.map(n => ({
+            id: n.id,
+            name: n.name,
+            institution: n.institution,
+            countryCode: n.countryCode,
+            group: n.group,
+            expanded: n.expanded,
+            count: n.count,
+            totalCitations: n.totalCitations,
+            worksCount: n.worksCount,
+            citedByCount: n.citedByCount,
+            affiliationsList: n.affiliationsList,
+            affiliationAttempted: n.affiliationAttempted,
+            orcid: n.orcid,
+            // Preserve pinned positions
+            fx: n.fx,
+            fy: n.fy,
+          })),
+          links: graphData.links.map(l => ({
+            source: typeof l.source === 'object' ? l.source.id : l.source,
+            target: typeof l.target === 'object' ? l.target.id : l.target,
+            value: l.value,
+          })),
+        };
+        localStorage.setItem('collab-explorer-graph-v1', JSON.stringify(serializable));
+        console.log('[PERSIST] Saved graph to localStorage:', serializable.nodes.length, 'nodes');
+      } catch (err) {
+        console.warn('[PERSIST] Failed to save graph:', err);
+      }
+    }, 500); // 500ms debounce
+    return () => clearTimeout(timer);
+  }, [graphData]);
+
+  // Effect to persist expandedAuthors to localStorage
+  useEffect(() => {
+    if (expandedAuthors.size === 0 && graphData.nodes.length === 0) return; // Don't save if truly empty
+    try {
+      localStorage.setItem('collab-explorer-expanded-v1', JSON.stringify([...expandedAuthors]));
+    } catch (err) {
+      console.warn('[PERSIST] Failed to save expandedAuthors:', err);
+    }
+  }, [expandedAuthors, graphData.nodes.length]);
 
   // Search for authors using OpenAlex
   const searchAuthors = async () => {
@@ -914,6 +992,10 @@ const CollaborationExplorer = () => {
     setGraphData({ nodes: [], links: [] });
     setExpandedAuthors(new Set());
     setSelectedNodeId(null);
+    // Clear persisted state from localStorage
+    localStorage.removeItem('collab-explorer-graph-v1');
+    localStorage.removeItem('collab-explorer-expanded-v1');
+    console.log('[RESET] Cleared localStorage');
     closeSidebarOnMobile();
   };
 
