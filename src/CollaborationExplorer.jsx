@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Search, Filter, X, Loader2, Users, BookOpen, Award, 
-  AlertCircle, Info, Link, ChevronLeft, ChevronRight, Menu 
+  AlertCircle, Info, Link, ChevronLeft, ChevronRight, Menu, HelpCircle, ChevronDown 
 } from 'lucide-react';
 import * as d3 from 'd3';
 
@@ -80,40 +80,10 @@ const COUNTRIES = [
   { code: 'CZ', name: 'Czech Republic', continent: 'europe' },
 ].sort((a, b) => a.name.localeCompare(b.name));
 
-// Fallback country codes for institutions where OpenAlex has null country_code
-// Key can be ROR ID or institution name (lowercase)
-const INSTITUTION_COUNTRY_FALLBACK = {
-  // By ROR ID
-  'https://ror.org/00sekdz59': 'US', // Flatiron Institute
-  'https://ror.org/05dxps055': 'US', // California Institute of Technology
-  // By name (lowercase) - add more as needed
-  'flatiron institute': 'US',
-  'simons foundation': 'US',
-  'institute for advanced study': 'US',
-  'perimeter institute': 'CA',
-};
-
-// Helper to get country code with fallback
-const getCountryCodeWithFallback = (institution) => {
+// Helper to get country code from institution object
+const getCountryCode = (institution) => {
   if (!institution) return null;
-  
-  // First, try the direct country_code
-  if (institution.country_code) return institution.country_code;
-  
-  // Try ROR fallback
-  if (institution.ror && INSTITUTION_COUNTRY_FALLBACK[institution.ror]) {
-    return INSTITUTION_COUNTRY_FALLBACK[institution.ror];
-  }
-  
-  // Try name fallback (lowercase)
-  if (institution.display_name) {
-    const nameLower = institution.display_name.toLowerCase();
-    if (INSTITUTION_COUNTRY_FALLBACK[nameLower]) {
-      return INSTITUTION_COUNTRY_FALLBACK[nameLower];
-    }
-  }
-  
-  return null;
+  return institution.country_code || null;
 };
 
 // Helper to parse complex affiliations
@@ -123,11 +93,11 @@ const getAuthorAffiliationProfile = (authorData) => {
   const fallback = {
     primary: {
       name: lastKnownInst?.display_name || 'Unknown',
-      countryCode: getCountryCodeWithFallback(lastKnownInst)
+      countryCode: getCountryCode(lastKnownInst)
     },
     all: lastKnownInst ? [{
       name: lastKnownInst.display_name,
-      countryCode: getCountryCodeWithFallback(lastKnownInst),
+      countryCode: getCountryCode(lastKnownInst),
       years: []
     }] : [] // Include last_known in 'all' for display consistency
   };
@@ -154,12 +124,11 @@ const getAuthorAffiliationProfile = (authorData) => {
   // This ensures the "Primary" institution is the one they are most established at
   currentAffiliations.sort((a, b) => b.years.length - a.years.length);
 
-  // 4. Extract clean objects with fallback country codes
+  // 4. Extract clean objects
   const formattedAffiliations = currentAffiliations.map(aff => {
-    const countryCode = getCountryCodeWithFallback(aff.institution);
     return {
       name: aff.institution.display_name,
-      countryCode: countryCode,
+      countryCode: getCountryCode(aff.institution),
       years: aff.years
     };
   });
@@ -176,9 +145,37 @@ const CollaborationExplorer = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
+  // Initialize graphData from localStorage (restore session on reload)
+  const [graphData, setGraphData] = useState(() => {
+    if (typeof window === 'undefined') return { nodes: [], links: [] };
+    try {
+      const stored = localStorage.getItem('collab-explorer-graph-v1');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        console.log('[RESTORE] Loaded graph from localStorage:', parsed.nodes?.length, 'nodes');
+        return parsed;
+      }
+    } catch (err) {
+      console.warn('[RESTORE] Failed to parse stored graph:', err);
+    }
+    return { nodes: [], links: [] };
+  });
   const [selectedNodeId, setSelectedNodeId] = useState(null); // Separate state for selection
-  const [expandedAuthors, setExpandedAuthors] = useState(new Set());
+  // Initialize expandedAuthors from localStorage
+  const [expandedAuthors, setExpandedAuthors] = useState(() => {
+    if (typeof window === 'undefined') return new Set();
+    try {
+      const stored = localStorage.getItem('collab-explorer-expanded-v1');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        console.log('[RESTORE] Loaded expandedAuthors from localStorage:', parsed.length, 'authors');
+        return new Set(parsed);
+      }
+    } catch (err) {
+      console.warn('[RESTORE] Failed to parse stored expandedAuthors:', err);
+    }
+    return new Set();
+  });
   const [locationFilter, setLocationFilter] = useState({ continents: [], countries: [] });
   const [showUnknownInstitutions, setShowUnknownInstitutions] = useState(true);
   const [filters, setFilters] = useState({
@@ -190,13 +187,24 @@ const CollaborationExplorer = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [showLocationFilter, setShowLocationFilter] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // State for sidebar toggle
-  // Institution fetch mode: 'smart' = from works, fetch profile if unknown; 'always' = always fetch profile
-  const [institutionFetchMode, setInstitutionFetchMode] = useState('smart');
+  // Fix unknown affiliations state
+  const [isFixingUnknowns, setIsFixingUnknowns] = useState(false);
+  const [fixProgress, setFixProgress] = useState({ current: 0, total: 0 });
+  // Mobile detection for bottom sheet vs sidebar selection
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  // Legend visibility with localStorage persistence
+  const [showLegend, setShowLegend] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('legend-visible');
+    if (stored !== null) return stored === 'true';
+    return window.innerWidth >= 768; // Default: visible on desktop, hidden on mobile
+  });
 
   const svgRef = useRef(null);
   const simulationRef = useRef(null);
   const wrapperRef = useRef(null); // Ref for the SVG container
   const institutionColorRef = useRef(d3.scaleOrdinal(d3.schemeCategory10)); // Store color scale in ref
+  const fixingAbortRef = useRef(false); // Abort flag for fixing unknowns
 
   // Email for polite pool - increases rate limit
   const POLITE_EMAIL = 'user@academic-collab.app';
@@ -205,6 +213,70 @@ const CollaborationExplorer = () => {
   const API_BASE = window.location.hostname === 'localhost' 
     ? 'https://api.openalex.org' 
     : '/api';
+
+  // Effect to track window resize for mobile detection
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Effect to persist legend visibility to localStorage
+  useEffect(() => {
+    localStorage.setItem('legend-visible', showLegend.toString());
+  }, [showLegend]);
+
+  // Effect to persist graph state to localStorage (debounced to avoid excessive writes)
+  useEffect(() => {
+    if (graphData.nodes.length === 0) return; // Don't save empty state
+    const timer = setTimeout(() => {
+      try {
+        // Serialize nodes (strip D3-specific properties like x, y, vx, vy but keep fx, fy for pinned)
+        const serializable = {
+          nodes: graphData.nodes.map(n => ({
+            id: n.id,
+            name: n.name,
+            institution: n.institution,
+            countryCode: n.countryCode,
+            group: n.group,
+            expanded: n.expanded,
+            count: n.count,
+            totalCitations: n.totalCitations,
+            worksCount: n.worksCount,
+            citedByCount: n.citedByCount,
+            affiliationsList: n.affiliationsList,
+            affiliationAttempted: n.affiliationAttempted,
+            orcid: n.orcid,
+            // Preserve pinned positions
+            fx: n.fx,
+            fy: n.fy,
+          })),
+          links: graphData.links.map(l => ({
+            source: typeof l.source === 'object' ? l.source.id : l.source,
+            target: typeof l.target === 'object' ? l.target.id : l.target,
+            value: l.value,
+          })),
+        };
+        localStorage.setItem('collab-explorer-graph-v1', JSON.stringify(serializable));
+        console.log('[PERSIST] Saved graph to localStorage:', serializable.nodes.length, 'nodes');
+      } catch (err) {
+        console.warn('[PERSIST] Failed to save graph:', err);
+      }
+    }, 500); // 500ms debounce
+    return () => clearTimeout(timer);
+  }, [graphData]);
+
+  // Effect to persist expandedAuthors to localStorage
+  useEffect(() => {
+    if (expandedAuthors.size === 0 && graphData.nodes.length === 0) return; // Don't save if truly empty
+    try {
+      localStorage.setItem('collab-explorer-expanded-v1', JSON.stringify([...expandedAuthors]));
+    } catch (err) {
+      console.warn('[PERSIST] Failed to save expandedAuthors:', err);
+    }
+  }, [expandedAuthors, graphData.nodes.length]);
 
   // Search for authors using OpenAlex
   const searchAuthors = async () => {
@@ -250,18 +322,24 @@ const CollaborationExplorer = () => {
         work.authorships.forEach(authorship => {
           const collabId = authorship.author.id;
           if (collabId && collabId !== authorId) {
-            const institution = (authorship.institutions && authorship.institutions[0]?.display_name) || 'Unknown';
-            const countryCode = (authorship.institutions && authorship.institutions[0]?.country_code) || null;
+            const institutionObj = authorship.institutions?.[0];
+            const institution = institutionObj?.display_name || 'Unknown';
+            const countryCode = getCountryCode(institutionObj);
             const existing = collaboratorMap.get(collabId);
             if (existing) {
               existing.count += 1;
               existing.totalCitations += work.cited_by_count || 0;
-              // If we previously had "Unknown" but now found a valid institution, update it
+              // If we previously had "Unknown" or missing country, try to update from this work
               if (existing.institution === 'Unknown' && institution !== 'Unknown') {
                 existing.institution = institution;
                 existing.countryCode = countryCode;
-                existing.needsProfileFetch = false;
               }
+              // If we now have a country code but didn't before, update it
+              if (!existing.countryCode && countryCode) {
+                existing.countryCode = countryCode;
+              }
+              // Update needsProfileFetch - only need fetch if still missing data
+              existing.needsProfileFetch = existing.institution === 'Unknown' || !existing.countryCode;
             } else {
               collaboratorMap.set(collabId, {
                 id: collabId,
@@ -270,68 +348,19 @@ const CollaborationExplorer = () => {
                 totalCitations: work.cited_by_count || 0,
                 institution: institution,
                 countryCode: countryCode,
-                needsProfileFetch: institution === 'Unknown', // Flag for smart mode
+                // Flag for smart mode: fetch profile if institution is unknown OR country code is missing
+                needsProfileFetch: institution === 'Unknown' || !countryCode,
               });
             }
           }
         });
       });
 
-      let collaborators = Array.from(collaboratorMap.values());
+      const collaborators = Array.from(collaboratorMap.values());
 
-      // Fetch detailed institution data based on mode
-      if (institutionFetchMode === 'always') {
-        // Fetch profile for ALL collaborators
-        const profilePromises = collaborators.map(async (collab) => {
-          try {
-            const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
-            const collabData = await fetchWithRetry(collabUrl);
-            const collabProfile = getAuthorAffiliationProfile(collabData);
-            return {
-              ...collab,
-              institution: collabProfile.primary.name,
-              countryCode: collabProfile.primary.countryCode,
-              affiliationsList: collabProfile.all,
-            };
-          } catch (err) {
-            console.warn(`Failed to fetch profile for ${collab.name}:`, err);
-            return collab; // Keep original data on failure
-          }
-        });
-        collaborators = await Promise.all(profilePromises);
-      } else if (institutionFetchMode === 'smart') {
-        // Only fetch profile for collaborators with unknown institutions
-        const unknownCollabs = collaborators.filter(c => c.needsProfileFetch);
-        if (unknownCollabs.length > 0) {
-          const profilePromises = unknownCollabs.map(async (collab) => {
-            try {
-              const collabUrl = `${API_BASE}/authors/${collab.id}?mailto=${POLITE_EMAIL}`;
-              const collabData = await fetchWithRetry(collabUrl);
-              const collabProfile = getAuthorAffiliationProfile(collabData);
-              return {
-                id: collab.id,
-                institution: collabProfile.primary.name,
-                countryCode: collabProfile.primary.countryCode,
-                affiliationsList: collabProfile.all,
-              };
-            } catch (err) {
-              console.warn(`Failed to fetch profile for ${collab.name}:`, err);
-              return null; // Signal failure
-            }
-          });
-          const fetchedProfiles = await Promise.all(profilePromises);
-          
-          // Update collaborators with fetched data
-          const profileMap = new Map(fetchedProfiles.filter(p => p).map(p => [p.id, p]));
-          collaborators = collaborators.map(collab => {
-            const fetched = profileMap.get(collab.id);
-            if (fetched) {
-              return { ...collab, ...fetched };
-            }
-            return collab;
-          });
-        }
-      }
+      // Log collaborator stats (unknowns will be fixed progressively after load)
+      const unknownCount = collaborators.filter(c => c.needsProfileFetch).length;
+      console.log(`[COLLABORATORS] Total: ${collaborators.length}, Unknown affiliations: ${unknownCount}`);
 
       return {
         author: {
@@ -351,7 +380,7 @@ const CollaborationExplorer = () => {
       console.error('Error fetching collaborators:', err);
       throw err;
     }
-  }, [filters.worksToFetch, API_BASE, institutionFetchMode]);
+  }, [filters.worksToFetch, API_BASE]);
 
   // Helper function to get continent for a country code
   const getContinentForCountry = useCallback((countryCode) => {
@@ -441,6 +470,76 @@ const CollaborationExplorer = () => {
     }
   }, []);
 
+  // Fix unknown affiliations progressively (fetches profiles one at a time with live updates)
+  // refreshAll = false: only fix unknowns, refreshAll = true: update all unattempted collaborators
+  const fixUnknownAffiliations = useCallback(async (refreshAll = false) => {
+    // Get nodes to process based on mode
+    const targetNodes = graphData.nodes.filter(
+      n => n.group === 'collaborator' && 
+           !n.affiliationAttempted && 
+           (refreshAll || n.institution === 'Unknown' || !n.countryCode)
+    );
+    
+    if (targetNodes.length === 0) {
+      console.log('[FIX AFFILIATIONS] No affiliations to update');
+      return;
+    }
+    
+    console.log(`[FIX AFFILIATIONS] Starting to update ${targetNodes.length} affiliations (mode: ${refreshAll ? 'all' : 'unknowns'})`);
+    setIsFixingUnknowns(true);
+    setFixProgress({ current: 0, total: targetNodes.length });
+    fixingAbortRef.current = false;
+    
+    for (let i = 0; i < targetNodes.length; i++) {
+      // Check if abort was requested
+      if (fixingAbortRef.current) {
+        console.log(`[FIX AFFILIATIONS] Aborted at ${i}/${targetNodes.length}`);
+        break;
+      }
+      
+      const node = targetNodes[i];
+      
+      try {
+        const collabUrl = `${API_BASE}/authors/${node.id}?mailto=${POLITE_EMAIL}`;
+        const collabData = await fetchWithRetry(collabUrl);
+        const collabProfile = getAuthorAffiliationProfile(collabData);
+        
+        // MUTATE the node directly to preserve D3 references
+        node.institution = collabProfile.primary.name;
+        node.countryCode = collabProfile.primary.countryCode;
+        node.affiliationsList = collabProfile.all;
+        node.affiliationAttempted = true; // Mark as attempted so we don't retry
+        
+        // Trigger re-render by updating graphData reference (but keeping same node objects)
+        setGraphData(prevData => ({ ...prevData }));
+        
+        console.log(`[FIX AFFILIATIONS] Updated ${i + 1}/${targetNodes.length}: ${node.name} -> ${collabProfile.primary.name}`);
+      } catch (err) {
+        console.warn(`[FIX AFFILIATIONS] Failed to update ${node.name}:`, err.message);
+        // Mark as attempted even on failure so we don't keep retrying
+        node.affiliationAttempted = true;
+        setGraphData(prevData => ({ ...prevData }));
+      }
+      
+      // Update progress
+      setFixProgress({ current: i + 1, total: targetNodes.length });
+      
+      // Delay between requests to respect rate limit (120ms = ~8 req/sec, safe for 10 req/sec limit)
+      if (i < targetNodes.length - 1 && !fixingAbortRef.current) {
+        await new Promise(res => setTimeout(res, 120));
+      }
+    }
+    
+    setIsFixingUnknowns(false);
+    console.log('[FIX AFFILIATIONS] Finished updating affiliations');
+  }, [graphData.nodes, API_BASE, POLITE_EMAIL]);
+
+  // Stop fixing unknowns
+  const stopFixingUnknowns = useCallback(() => {
+    fixingAbortRef.current = true;
+    console.log('[FIX UNKNOWNS] Stop requested');
+  }, []);
+
   // Add author to graph
   const addAuthorToGraph = useCallback(async (authorId) => {
     if (expandedAuthors.has(authorId)) return;
@@ -514,13 +613,24 @@ const CollaborationExplorer = () => {
       setSelectedNodeId(authorId); // Select the newly added node
       setShowLocationFilter(true); // Auto-expand location filter
       closeSidebarOnMobile(); // Close sidebar on mobile so user sees the graph
+      
+      // Auto-fix unknown affiliations after a brief delay (allows graph to render first)
+      setTimeout(() => {
+        // Check if there are unknowns to fix before starting (only unattempted ones)
+        const hasUnknowns = collaborators.some(
+          c => !c.affiliationAttempted && (c.institution === 'Unknown' || !c.countryCode)
+        );
+        if (hasUnknowns) {
+          fixUnknownAffiliations(false); // Only fix unknowns on auto-start
+        }
+      }, 500);
     } catch (err) {
       console.error('Failed to load author data:', err);
       setError(`Failed to load author data: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators, closeSidebarOnMobile]);
+  }, [expandedAuthors, filters.minCollaborations, filters.minCitations, fetchAuthorCollaborators, closeSidebarOnMobile, fixUnknownAffiliations]);
 
   // Memoized getter for the selected node
   const selectedNode = React.useMemo(() => {
@@ -882,6 +992,10 @@ const CollaborationExplorer = () => {
     setGraphData({ nodes: [], links: [] });
     setExpandedAuthors(new Set());
     setSelectedNodeId(null);
+    // Clear persisted state from localStorage
+    localStorage.removeItem('collab-explorer-graph-v1');
+    localStorage.removeItem('collab-explorer-expanded-v1');
+    console.log('[RESET] Cleared localStorage');
     closeSidebarOnMobile();
   };
 
@@ -1180,6 +1294,80 @@ const CollaborationExplorer = () => {
                 </label>
               </div>
 
+              {/* Fix Unknown Affiliations Section */}
+              {(() => {
+                // Count unknowns (need fixing) and all unattempted (for update all)
+                const unknownCount = graphData.nodes.filter(
+                  n => n.group === 'collaborator' && 
+                       !n.affiliationAttempted && 
+                       (n.institution === 'Unknown' || !n.countryCode)
+                ).length;
+                const refreshableCount = graphData.nodes.filter(
+                  n => n.group === 'collaborator' && !n.affiliationAttempted
+                ).length;
+                
+                if (isFixingUnknowns) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-gray-700 font-medium">
+                          Updating affiliations... {fixProgress.current}/{fixProgress.total}
+                        </span>
+                        <button
+                          onClick={stopFixingUnknowns}
+                          className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-1.5">
+                        <div 
+                          className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${(fixProgress.current / fixProgress.total) * 100}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                }
+                
+                if (unknownCount > 0) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <button
+                        onClick={() => fixUnknownAffiliations(false)}
+                        className="w-full text-xs px-3 py-2 bg-amber-100 text-amber-800 rounded-lg hover:bg-amber-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        Fix {unknownCount} Unknown Affiliations
+                      </button>
+                      {refreshableCount > unknownCount && (
+                        <button
+                          onClick={() => fixUnknownAffiliations(true)}
+                          className="w-full mt-1.5 text-xs text-gray-500 hover:text-blue-600 underline"
+                        >
+                          Or update all {refreshableCount} to current
+                        </button>
+                      )}
+                    </div>
+                  );
+                }
+                
+                if (refreshableCount > 0) {
+                  return (
+                    <div className="mt-3 pt-3 border-t border-blue-200">
+                      <button
+                        onClick={() => fixUnknownAffiliations(true)}
+                        className="w-full text-xs px-3 py-2 bg-blue-100 text-blue-800 rounded-lg hover:bg-blue-200 transition-colors flex items-center justify-center gap-2"
+                      >
+                        Update {refreshableCount} to Current Affiliations
+                      </button>
+                    </div>
+                  );
+                }
+                
+                return null;
+              })()}
+
               {(locationFilter.continents.length > 0 || locationFilter.countries.length > 0 || !showUnknownInstitutions) && (
                 <div className="mt-2 pt-2 border-t border-blue-100">
                   <p className="text-xs text-gray-600">
@@ -1230,39 +1418,6 @@ const CollaborationExplorer = () => {
                   onChange={(e) => handleFilterChange('worksToFetch', e.target.value || 200)}
                   className="w-full px-2 py-1 text-sm border border-gray-300 rounded"
                 />
-              </div>
-              <div className="pt-3 border-t border-gray-200">
-                <label className="text-xs text-gray-600 block mb-2">Collaborator Institution Source</label>
-                <div className="space-y-2">
-                  <label className="flex items-start gap-2 text-xs cursor-pointer">
-                    <input
-                      type="radio"
-                      name="institutionMode"
-                      value="smart"
-                      checked={institutionFetchMode === 'smart'}
-                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <span className="font-medium text-gray-700">Smart</span>
-                      <p className="text-gray-500">Use institution from shared work; fetch profile only if unknown</p>
-                    </div>
-                  </label>
-                  <label className="flex items-start gap-2 text-xs cursor-pointer">
-                    <input
-                      type="radio"
-                      name="institutionMode"
-                      value="always"
-                      checked={institutionFetchMode === 'always'}
-                      onChange={(e) => setInstitutionFetchMode(e.target.value)}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <span className="font-medium text-gray-700">Always Accurate</span>
-                      <p className="text-gray-500">Always fetch each collaborator's profile (slower, more API calls)</p>
-                    </div>
-                  </label>
-                </div>
               </div>
             </div>
           )}
@@ -1448,34 +1603,137 @@ const CollaborationExplorer = () => {
           </div>
         )}
         
+        {/* Collapsible Legend */}
         {graphData.nodes.length > 0 && (
-          <div className="absolute bottom-4 left-4 bg-white p-4 rounded-lg shadow-lg pointer-events-none">
-            <h4 className="text-xs font-semibold text-gray-700 mb-2">Legend</h4>
-            <div className="space-y-2 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-blue-500 border-2 border-white shadow-sm"></div>
-                <span>Starting Author</span>
+          <div className={`absolute left-4 transition-all duration-200 ${
+            selectedNode && isMobile && !isSidebarOpen ? 'bottom-52' : 'bottom-4'
+          }`}>
+            {showLegend ? (
+              <div className="bg-white p-4 rounded-lg shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold text-gray-700">Legend</h4>
+                  <button
+                    onClick={() => setShowLegend(false)}
+                    className="text-gray-400 hover:text-gray-600 p-0.5"
+                    aria-label="Collapse legend"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-blue-500 border-2 border-white shadow-sm"></div>
+                    <span>Starting Author</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-purple-500 border-2 border-white shadow-sm"></div>
+                    <span>Expanded Author</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-green-500 border-2 border-white shadow-sm"></div>
+                    <span>Collaborator (by Institution)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-gray-400 border-2 border-slate-500" style={{borderStyle: 'dashed'}}></div>
+                    <span>Pinned Node</span>
+                  </div>
+                </div>
+                <div className="mt-3 pt-3 border-t border-gray-200 text-xs text-gray-600">
+                  <p>• Click to view details</p>
+                  <p>• Double-click to expand</p>
+                  <p>• Drag to pin in place</p>
+                  <p>• Right-click / long-press to unpin</p>
+                  <p>• Scroll to zoom</p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-purple-500 border-2 border-white shadow-sm"></div>
-                <span>Expanded Author</span>
+            ) : (
+              <button
+                onClick={() => setShowLegend(true)}
+                className="bg-white p-2.5 rounded-full shadow-lg hover:bg-gray-50 border border-gray-200"
+                aria-label="Show legend"
+              >
+                <HelpCircle className="w-5 h-5 text-gray-600" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Mobile Bottom Sheet - shows when node selected on mobile and sidebar is closed */}
+        {selectedNode && isMobile && !isSidebarOpen && (
+          <div className="fixed bottom-0 inset-x-0 z-30 bg-white rounded-t-2xl shadow-2xl border-t border-gray-200 p-4 pb-6 animate-slide-up">
+            {/* Handle bar */}
+            <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-3" />
+            
+            {/* Header row: Name + Close */}
+            <div className="flex items-start justify-between mb-2">
+              <div className="flex-1 min-w-0 pr-2">
+                <div className="font-semibold text-gray-900 text-base truncate">{selectedNode.name}</div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-green-500 border-2 border-white shadow-sm"></div>
-                <span>Collaborator (by Institution)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-gray-400 border-2 border-slate-500" style={{borderStyle: 'dashed'}}></div>
-                <span>Pinned Node</span>
-              </div>
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 -mr-1"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <div className="mt-3 pt-3 border-t border-gray-200 text-xs text-gray-600">
-              <p>• Click to view details</p>
-              <p>• Double-click to expand</p>
-              <p>• Drag to pin in place</p>
-              <p>• Right-click / long-press to unpin</p>
-              <p>• Scroll to zoom</p>
+
+            {/* Affiliations list - dynamic height */}
+            <div className="text-xs text-gray-600 space-y-1 mb-3">
+              {selectedNode.affiliationsList && selectedNode.affiliationsList.length > 0 ? (
+                selectedNode.affiliationsList.map((aff, index) => (
+                  <div key={index} className="flex items-start gap-1.5">
+                    <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${index === 0 ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                    <span className="truncate">{aff.name}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="flex items-start gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 bg-blue-500" />
+                  <span className="truncate">{selectedNode.institution || 'Unknown Institution'}</span>
+                </div>
+              )}
             </div>
+            
+            {/* Inline stats */}
+            <div className="flex items-center gap-3 text-xs text-gray-600 mb-3">
+              {selectedNode.worksCount !== undefined && (
+                <span className="flex items-center gap-1">
+                  <BookOpen className="w-3.5 h-3.5" />
+                  {selectedNode.worksCount}
+                </span>
+              )}
+              {selectedNode.citedByCount !== undefined && (
+                <span className="flex items-center gap-1">
+                  <Award className="w-3.5 h-3.5" />
+                  {selectedNode.citedByCount}
+                </span>
+              )}
+              {selectedNode.count && (
+                <span className="flex items-center gap-1">
+                  <Users className="w-3.5 h-3.5" />
+                  {selectedNode.count} collabs
+                </span>
+              )}
+            </div>
+            
+            {/* Action button */}
+            {!selectedNode.expanded ? (
+              <button
+                onClick={() => addAuthorToGraph(selectedNode.id)}
+                disabled={loading}
+                className="w-full px-4 py-2.5 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Loading...' : 'Expand Collaborators'}
+              </button>
+            ) : (
+              <button
+                onClick={() => undoExpansion(selectedNode.id)}
+                className="w-full px-4 py-2.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors border border-red-300"
+              >
+                Undo Expansion
+              </button>
+            )}
           </div>
         )}
       </div>
