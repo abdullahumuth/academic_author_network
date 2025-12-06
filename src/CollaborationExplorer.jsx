@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Search, Filter, X, Loader2, Users, BookOpen, Award, 
-  AlertCircle, Info, Link, ChevronLeft, ChevronRight, Menu 
+  AlertCircle, Info, Link, ChevronLeft, ChevronRight, Menu, HelpCircle, ChevronDown 
 } from 'lucide-react';
 import * as d3 from 'd3';
 
@@ -80,40 +80,10 @@ const COUNTRIES = [
   { code: 'CZ', name: 'Czech Republic', continent: 'europe' },
 ].sort((a, b) => a.name.localeCompare(b.name));
 
-// Fallback country codes for institutions where OpenAlex has null country_code
-// Key can be ROR ID or institution name (lowercase)
-const INSTITUTION_COUNTRY_FALLBACK = {
-  // By ROR ID
-  'https://ror.org/00sekdz59': 'US', // Flatiron Institute
-  'https://ror.org/05dxps055': 'US', // California Institute of Technology
-  // By name (lowercase) - add more as needed
-  'flatiron institute': 'US',
-  'simons foundation': 'US',
-  'institute for advanced study': 'US',
-  'perimeter institute': 'CA',
-};
-
-// Helper to get country code with fallback
-const getCountryCodeWithFallback = (institution) => {
+// Helper to get country code from institution object
+const getCountryCode = (institution) => {
   if (!institution) return null;
-  
-  // First, try the direct country_code
-  if (institution.country_code) return institution.country_code;
-  
-  // Try ROR fallback
-  if (institution.ror && INSTITUTION_COUNTRY_FALLBACK[institution.ror]) {
-    return INSTITUTION_COUNTRY_FALLBACK[institution.ror];
-  }
-  
-  // Try name fallback (lowercase)
-  if (institution.display_name) {
-    const nameLower = institution.display_name.toLowerCase();
-    if (INSTITUTION_COUNTRY_FALLBACK[nameLower]) {
-      return INSTITUTION_COUNTRY_FALLBACK[nameLower];
-    }
-  }
-  
-  return null;
+  return institution.country_code || null;
 };
 
 // Helper to parse complex affiliations
@@ -123,11 +93,11 @@ const getAuthorAffiliationProfile = (authorData) => {
   const fallback = {
     primary: {
       name: lastKnownInst?.display_name || 'Unknown',
-      countryCode: getCountryCodeWithFallback(lastKnownInst)
+      countryCode: getCountryCode(lastKnownInst)
     },
     all: lastKnownInst ? [{
       name: lastKnownInst.display_name,
-      countryCode: getCountryCodeWithFallback(lastKnownInst),
+      countryCode: getCountryCode(lastKnownInst),
       years: []
     }] : [] // Include last_known in 'all' for display consistency
   };
@@ -154,12 +124,11 @@ const getAuthorAffiliationProfile = (authorData) => {
   // This ensures the "Primary" institution is the one they are most established at
   currentAffiliations.sort((a, b) => b.years.length - a.years.length);
 
-  // 4. Extract clean objects with fallback country codes
+  // 4. Extract clean objects
   const formattedAffiliations = currentAffiliations.map(aff => {
-    const countryCode = getCountryCodeWithFallback(aff.institution);
     return {
       name: aff.institution.display_name,
-      countryCode: countryCode,
+      countryCode: getCountryCode(aff.institution),
       years: aff.years
     };
   });
@@ -192,6 +161,15 @@ const CollaborationExplorer = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true); // State for sidebar toggle
   // Institution fetch mode: 'smart' = from works, fetch profile if unknown; 'always' = always fetch profile
   const [institutionFetchMode, setInstitutionFetchMode] = useState('smart');
+  // Mobile detection for bottom sheet vs sidebar selection
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  // Legend visibility with localStorage persistence
+  const [showLegend, setShowLegend] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('legend-visible');
+    if (stored !== null) return stored === 'true';
+    return window.innerWidth >= 768; // Default: visible on desktop, hidden on mobile
+  });
 
   const svgRef = useRef(null);
   const simulationRef = useRef(null);
@@ -205,6 +183,20 @@ const CollaborationExplorer = () => {
   const API_BASE = window.location.hostname === 'localhost' 
     ? 'https://api.openalex.org' 
     : '/api';
+
+  // Effect to track window resize for mobile detection
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Effect to persist legend visibility to localStorage
+  useEffect(() => {
+    localStorage.setItem('legend-visible', showLegend.toString());
+  }, [showLegend]);
 
   // Search for authors using OpenAlex
   const searchAuthors = async () => {
@@ -250,18 +242,24 @@ const CollaborationExplorer = () => {
         work.authorships.forEach(authorship => {
           const collabId = authorship.author.id;
           if (collabId && collabId !== authorId) {
-            const institution = (authorship.institutions && authorship.institutions[0]?.display_name) || 'Unknown';
-            const countryCode = (authorship.institutions && authorship.institutions[0]?.country_code) || null;
+            const institutionObj = authorship.institutions?.[0];
+            const institution = institutionObj?.display_name || 'Unknown';
+            const countryCode = getCountryCode(institutionObj);
             const existing = collaboratorMap.get(collabId);
             if (existing) {
               existing.count += 1;
               existing.totalCitations += work.cited_by_count || 0;
-              // If we previously had "Unknown" but now found a valid institution, update it
+              // If we previously had "Unknown" or missing country, try to update from this work
               if (existing.institution === 'Unknown' && institution !== 'Unknown') {
                 existing.institution = institution;
                 existing.countryCode = countryCode;
-                existing.needsProfileFetch = false;
               }
+              // If we now have a country code but didn't before, update it
+              if (!existing.countryCode && countryCode) {
+                existing.countryCode = countryCode;
+              }
+              // Update needsProfileFetch - only need fetch if still missing data
+              existing.needsProfileFetch = existing.institution === 'Unknown' || !existing.countryCode;
             } else {
               collaboratorMap.set(collabId, {
                 id: collabId,
@@ -270,7 +268,8 @@ const CollaborationExplorer = () => {
                 totalCitations: work.cited_by_count || 0,
                 institution: institution,
                 countryCode: countryCode,
-                needsProfileFetch: institution === 'Unknown', // Flag for smart mode
+                // Flag for smart mode: fetch profile if institution is unknown OR country code is missing
+                needsProfileFetch: institution === 'Unknown' || !countryCode,
               });
             }
           }
@@ -1448,34 +1447,137 @@ const CollaborationExplorer = () => {
           </div>
         )}
         
+        {/* Collapsible Legend */}
         {graphData.nodes.length > 0 && (
-          <div className="absolute bottom-4 left-4 bg-white p-4 rounded-lg shadow-lg pointer-events-none">
-            <h4 className="text-xs font-semibold text-gray-700 mb-2">Legend</h4>
-            <div className="space-y-2 text-xs">
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-blue-500 border-2 border-white shadow-sm"></div>
-                <span>Starting Author</span>
+          <div className={`absolute left-4 transition-all duration-200 ${
+            selectedNode && isMobile && !isSidebarOpen ? 'bottom-52' : 'bottom-4'
+          }`}>
+            {showLegend ? (
+              <div className="bg-white p-4 rounded-lg shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-semibold text-gray-700">Legend</h4>
+                  <button
+                    onClick={() => setShowLegend(false)}
+                    className="text-gray-400 hover:text-gray-600 p-0.5"
+                    aria-label="Collapse legend"
+                  >
+                    <ChevronDown className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-blue-500 border-2 border-white shadow-sm"></div>
+                    <span>Starting Author</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-purple-500 border-2 border-white shadow-sm"></div>
+                    <span>Expanded Author</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-green-500 border-2 border-white shadow-sm"></div>
+                    <span>Collaborator (by Institution)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 rounded-full bg-gray-400 border-2 border-slate-500" style={{borderStyle: 'dashed'}}></div>
+                    <span>Pinned Node</span>
+                  </div>
+                </div>
+                <div className="mt-3 pt-3 border-t border-gray-200 text-xs text-gray-600">
+                  <p>• Click to view details</p>
+                  <p>• Double-click to expand</p>
+                  <p>• Drag to pin in place</p>
+                  <p>• Right-click / long-press to unpin</p>
+                  <p>• Scroll to zoom</p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-purple-500 border-2 border-white shadow-sm"></div>
-                <span>Expanded Author</span>
+            ) : (
+              <button
+                onClick={() => setShowLegend(true)}
+                className="bg-white p-2.5 rounded-full shadow-lg hover:bg-gray-50 border border-gray-200"
+                aria-label="Show legend"
+              >
+                <HelpCircle className="w-5 h-5 text-gray-600" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Mobile Bottom Sheet - shows when node selected on mobile and sidebar is closed */}
+        {selectedNode && isMobile && !isSidebarOpen && (
+          <div className="fixed bottom-0 inset-x-0 z-30 bg-white rounded-t-2xl shadow-2xl border-t border-gray-200 p-4 pb-6 animate-slide-up">
+            {/* Handle bar */}
+            <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-3" />
+            
+            {/* Header row: Name + Close */}
+            <div className="flex items-start justify-between mb-2">
+              <div className="flex-1 min-w-0 pr-2">
+                <div className="font-semibold text-gray-900 text-base truncate">{selectedNode.name}</div>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-green-500 border-2 border-white shadow-sm"></div>
-                <span>Collaborator (by Institution)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-gray-400 border-2 border-slate-500" style={{borderStyle: 'dashed'}}></div>
-                <span>Pinned Node</span>
-              </div>
+              <button
+                onClick={() => setSelectedNodeId(null)}
+                className="text-gray-400 hover:text-gray-600 p-1 -mr-1"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <div className="mt-3 pt-3 border-t border-gray-200 text-xs text-gray-600">
-              <p>• Click to view details</p>
-              <p>• Double-click to expand</p>
-              <p>• Drag to pin in place</p>
-              <p>• Right-click / long-press to unpin</p>
-              <p>• Scroll to zoom</p>
+
+            {/* Affiliations list - dynamic height */}
+            <div className="text-xs text-gray-600 space-y-1 mb-3">
+              {selectedNode.affiliationsList && selectedNode.affiliationsList.length > 0 ? (
+                selectedNode.affiliationsList.map((aff, index) => (
+                  <div key={index} className="flex items-start gap-1.5">
+                    <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${index === 0 ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                    <span className="truncate">{aff.name}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="flex items-start gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 bg-blue-500" />
+                  <span className="truncate">{selectedNode.institution || 'Unknown Institution'}</span>
+                </div>
+              )}
             </div>
+            
+            {/* Inline stats */}
+            <div className="flex items-center gap-3 text-xs text-gray-600 mb-3">
+              {selectedNode.worksCount !== undefined && (
+                <span className="flex items-center gap-1">
+                  <BookOpen className="w-3.5 h-3.5" />
+                  {selectedNode.worksCount}
+                </span>
+              )}
+              {selectedNode.citedByCount !== undefined && (
+                <span className="flex items-center gap-1">
+                  <Award className="w-3.5 h-3.5" />
+                  {selectedNode.citedByCount}
+                </span>
+              )}
+              {selectedNode.count && (
+                <span className="flex items-center gap-1">
+                  <Users className="w-3.5 h-3.5" />
+                  {selectedNode.count} collabs
+                </span>
+              )}
+            </div>
+            
+            {/* Action button */}
+            {!selectedNode.expanded ? (
+              <button
+                onClick={() => addAuthorToGraph(selectedNode.id)}
+                disabled={loading}
+                className="w-full px-4 py-2.5 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Loading...' : 'Expand Collaborators'}
+              </button>
+            ) : (
+              <button
+                onClick={() => undoExpansion(selectedNode.id)}
+                className="w-full px-4 py-2.5 bg-red-100 text-red-700 text-sm font-medium rounded-lg hover:bg-red-200 transition-colors border border-red-300"
+              >
+                Undo Expansion
+              </button>
+            )}
           </div>
         )}
       </div>
